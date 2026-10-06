@@ -1,28 +1,30 @@
-CREATE TABLE usuario ( 
-    id_usuario UUID PRIMARY KEY, 
-    nombre VARCHAR(100) NOT NULL, 
-    apellido VARCHAR(100) NOT NULL, 
-    email VARCHAR(255) NOT NULL UNIQUE, 
-    activo BOOLEAN NOT NULL DEFAULT TRUE, 
-    rol VARCHAR(20) NOT NULL, 
- 
-    CONSTRAINT usuario_rol_check 
-        CHECK (rol IN ('ADMINISTRADOR', 'EMPLEADO')) 
+CREATE TABLE public.usuario (
+    id_usuario UUID PRIMARY KEY
+        REFERENCES auth.users(id)
+        ON DELETE CASCADE,
+    nombre VARCHAR(100) NOT NULL,
+    apellido VARCHAR(100) NOT NULL,
+    email VARCHAR(255) NOT NULL UNIQUE,
+    activo BOOLEAN NOT NULL DEFAULT TRUE,
+    rol VARCHAR(20) NOT NULL,
+
+    CONSTRAINT usuario_rol_check
+        CHECK (rol IN ('ADMINISTRADOR', 'EMPLEADO'))
 );
 
 
-CREATE TABLE categoria (
-    id_categoria UUID PRIMARY KEY,
+CREATE TABLE public.categoria (
+    id_categoria UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     nombre VARCHAR(100) NOT NULL UNIQUE,
     descripcion TEXT
 );
 
 
-CREATE TABLE producto ( 
-    id_producto UUID PRIMARY KEY, 
-    nombre VARCHAR(100) NOT NULL, 
-    precio NUMERIC(12,2) NOT NULL, 
-    descripcion TEXT, 
+CREATE TABLE public.producto (
+    id_producto UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    nombre VARCHAR(100) NOT NULL,
+    precio NUMERIC(12,2) NOT NULL,
+    descripcion TEXT,
     stock_actual INT NOT NULL,
     stock_minimo INT NOT NULL,
     stock_maximo INT NOT NULL,
@@ -48,13 +50,13 @@ CREATE TABLE producto (
 
     CONSTRAINT producto_categoria_fk
         FOREIGN KEY (id_categoria)
-        REFERENCES categoria(id_categoria)
+        REFERENCES public.categoria(id_categoria)
 );
 
 
-CREATE TABLE movimiento_stock (
-    id_movimiento UUID PRIMARY KEY,
-    fecha_hora TIMESTAMPTZ NOT NULL,
+CREATE TABLE public.movimiento_stock (
+    id_movimiento UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    fecha_hora TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     tipo VARCHAR(20) NOT NULL,
     cantidad INT NOT NULL,
     motivo TEXT NOT NULL,
@@ -69,9 +71,9 @@ CREATE TABLE movimiento_stock (
 
     CONSTRAINT movimiento_producto_fk
         FOREIGN KEY (id_producto)
-        REFERENCES producto(id_producto),
+        REFERENCES public.producto(id_producto),
 
     CONSTRAINT movimiento_usuario_fk
         FOREIGN KEY (id_usuario)
-        REFERENCES usuario(id_usuario)
+        REFERENCES public.usuario(id_usuario)
 );
