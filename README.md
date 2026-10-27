@@ -9,6 +9,11 @@ Servidor REST API desarrollado en Node.js y Express para el control de inventari
 
 IMPORTANTE!  NO HACER COMMITS DIRECTOS AL MAIN 
 
+## Base de datos (Supabase)
+
+La base de datos vive en Supabase y se maneja con migraciones en la carpeta `supabase/`.
+Cómo instalar la CLI, el esquema, los roles y permisos, cómo probar cambios en local y los problemas conocidos están en **[supabase/README.md](supabase/README.md)**.
+
 ## Instalación local
 
 1. Clonar el repositorio:
