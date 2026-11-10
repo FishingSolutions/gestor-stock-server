@@ -37,7 +37,8 @@ supabase/
 │   ├── 20261026161316_correcciones_esquema.sql   Permisos, RLS, login y protección del historial
 │   ├── 20261027122541_registrar_movimiento.sql   KAN-37: función para registrar movimientos
 │   ├── 20261109233502_dashboard_y_productos.sql  Datos del Dashboard y de la vista Productos
-│   └── 20261109235056_usuarios_y_roles.sql       Reglas de usuarios y stock solo por movimientos
+│   ├── 20261109235056_usuarios_y_roles.sql       Reglas de usuarios y stock solo por movimientos
+│   └── 20261110011736_cuentas_nuevas_desactivadas.sql  Quien se registra solo entra desactivado
 ├── functions/
 │   └── gestionar-usuarios/index.ts    Edge Function: el admin crea, activa y desactiva usuarios
 ├── pruebas/
@@ -48,7 +49,7 @@ supabase/
 │   ├── datos_demo.sql                     Usuarios, productos y movimientos de demo (solo local)
 │   ├── pruebas_dashboard.sql              47 pruebas del Dashboard y la vista Productos
 │   ├── prueba_rendimiento.sql             5.000 productos y 100.000 movimientos: mide tiempos
-│   └── prueba_usuarios_y_roles.sh         52 pruebas por la API: usuarios y ADMIN vs EMPLEADO
+│   └── prueba_usuarios_y_roles.sh         65 pruebas por la API: usuarios, registro propio y ADMIN vs EMPLEADO
 └── .temp/                   Datos locales de la CLI (NO se sube, está en .gitignore)
 ```
 
@@ -180,6 +181,7 @@ La seguridad está en la base con **RLS** (Row Level Security) y permisos por co
 
 Reglas que la base hace cumplir siempre:
 - Un usuario con `activo = false` **no puede iniciar sesión** y, si tenía una sesión abierta, no ve nada.
+- **Una cuenta que se registra sola entra desactivada**: no ve ni puede hacer nada hasta que un admin la activa. Solo entran activas las cuentas que crea un admin con `gestionar-usuarios`.
 - Siempre queda **al menos un ADMINISTRADOR activo**: no se puede desactivar ni quitarle el rol al último.
 - El stock **nunca** se edita a mano, tampoco el admin. Todo cambio pasa por un movimiento y queda en el historial.
 - La función `public.rol_actual()` devuelve el rol del usuario logueado (o null). Las reglas RLS la usan.
@@ -438,7 +440,20 @@ Cada fila de `usuario` corresponde a una cuenta de login de Supabase (`auth.user
 - El rol **nunca** se toma de lo que manda quien se registra, para que nadie se haga admin solo. Un ADMINISTRADOR lo cambia después.
 - Si ya existía una fila en `usuario` con ese email, se vincula con la cuenta nueva y **conserva su rol**.
 
-**Cómo se dan de alta los usuarios:** los crea un ADMINISTRADOR desde la app, con la Edge Function [`gestionar-usuarios`](#8-gestionar-usuarios-edge-function-gestionar-usuarios-solo-administrador). Nadie se registra solo. Por eso hay que **apagar el registro público** en Supabase (*Authentication → Sign In / Providers → "Allow new users to sign up"*). La Edge Function sigue pudiendo crear usuarios con el registro apagado.
+**Cómo se dan de alta los usuarios:** los crea un ADMINISTRADOR desde la app, con la Edge Function [`gestionar-usuarios`](#8-gestionar-usuarios-edge-function-gestionar-usuarios-solo-administrador). Esas cuentas entran **activas**.
+
+**¿Y si alguien se registra solo?** En Supabase está encendido *"Allow new users to sign up"* (el registro público), y no todos los integrantes tienen permiso para apagarlo. Con la clave pública del front, cualquiera podría crearse una cuenta. Por eso, desde la migración `cuentas_nuevas_desactivadas`:
+
+| Cómo se creó la cuenta | Cómo queda en `usuario` |
+|---|---|
+| La creó un admin con `gestionar-usuarios` | EMPLEADO (o el rol elegido), **activa** |
+| Se registró sola desde la API / la app | EMPLEADO, **desactivada**: no ve ni hace nada |
+| Se creó a mano en el dashboard de Supabase (*Add user*) | EMPLEADO, **desactivada**: un admin la activa desde la app |
+| Ya había una fila en `usuario` con ese email (como el Admin Prueba) | se vincula y **conserva** su rol y estado |
+
+La función marca sus cuentas con `creado_por_admin` en `app_metadata`. Ese dato **solo lo puede escribir el servidor**: quien se registra solo no puede ponérselo (está probado).
+
+Igual conviene **apagar el registro público** cuando alguien con permiso pueda (Owner o Administrator del proyecto): *Authentication → Sign In / Providers → "Allow new users to sign up"*. La Edge Function sigue creando usuarios con el registro apagado.
 
 ### Usuario de prueba para el equipo ✅
 
@@ -623,7 +638,7 @@ npx supabase start -x realtime,storage-api,imgproxy,mailpit,studio,logflare,vect
 npx supabase db reset --local --no-seed
 docker exec -i supabase_db_gestor-stock-server psql -U postgres -d postgres < supabase/pruebas/datos_demo.sql
 
-# 3. 52 pruebas por HTTP (cada línea dice OK o FALLO)
+# 3. 65 pruebas por HTTP (cada línea dice OK o FALLO)
 bash supabase/pruebas/prueba_usuarios_y_roles.sh
 ```
 
@@ -639,12 +654,24 @@ bash supabase/pruebas/prueba_usuarios_y_roles.sh
 | EMPLEADO | Ve productos, KPIs y dashboard; registra ENTRADA y SALIDA. **No puede** crear productos o categorías, cambiar precios, dar de baja, borrar, editar stock a mano, hacer AJUSTE ni crear usuarios | ✅ 13/13 |
 | ADMINISTRADOR | Crea productos y categorías, cambia precios, da de baja, hace AJUSTE, borra productos sin movimientos. **No puede** editar stock a mano ni borrar productos con movimientos | ✅ 8/8 |
 
+### Resultado de las pruebas (10/11/2026, migración `cuentas_nuevas_desactivadas`)
+**65 de 65 OK** por la API local: las 52 anteriores más 13 de registro propio. Las demás suites (47 del dashboard, permisos, `registrar_movimiento` y ventas simultáneas) siguen dando bien. El revisor de seguridad no encontró problemas.
+
+| Qué se verificó | Resultado |
+|---|---|
+| Un desconocido se registra con la clave pública: puede iniciar sesión, pero queda EMPLEADO **desactivado** | ✅ |
+| Ese usuario **no** ve productos ni KPIs, **no** puede registrar ventas ni crear usuarios | ✅ |
+| Otro se registra mandando `creado_por_admin: true` y `rol: ADMINISTRADOR` en sus datos: **igual** queda EMPLEADO desactivado | ✅ |
+| Cuando el admin lo activa desde la app, recién ahí ve productos | ✅ |
+| Las cuentas que crea el admin siguen entrando activas | ✅ |
+
 ---
 
 ## Problemas conocidos y soluciones
 
 | Problema | Causa | Solución |
 |---|---|---|
+| `db push` o `db pull`: `FATAL: (EAUTHQUERY) unsupported or invalid secret format` | Falla momentánea de la conexión automática de la CLI | Reintentar. Si sigue: `npx supabase db push --password "<contraseña de la base>"` o actualizar la CLI (`npm install supabase@latest --save-dev`) |
 | `failed to connect to the docker API ... docker_engine` | Docker Desktop no está abierto | Abrirlo y esperar "Engine running" |
 | Instalador de Docker: falta "Virtual Machine Platform" | WSL no está activado | `wsl --install` en PowerShell como administrador, reiniciar |
 | `db pull` falla con `PgDeltaEngineError ... invalid secret format` | Falla del motor de comparación nuevo | Usar `--diff-engine migra` |
@@ -661,10 +688,11 @@ bash supabase/pruebas/prueba_usuarios_y_roles.sh
 |---|---|---|
 | `20261026155217_remote_schema` | Esquema de KAN-39, 40 y 41 traído desde Supabase con `db pull` | ✅ (ya estaba) |
 | `20261026161316_correcciones_esquema` | Permisos, RLS por rol, `usuario` conectado al login, historial protegido, UNIQUE repetido eliminado | ✅ 27/10/2026 |
-| `20261027122541_registrar_movimiento` | KAN-37: columnas `stock_anterior` y `stock_resultante`, función `registrar_movimiento`, los usuarios activos ven a sus compañeros | ⏳ Pendiente de `db push` |
-| `20261109233502_dashboard_y_productos` | `producto.fecha_alta`, índices, vistas `v_producto` y `v_movimiento`, funciones `kpis_productos` y `dashboard_resumen` | ⏳ Pendiente de `db push` (necesita la anterior) |
-| `20261109235056_usuarios_y_roles` | `activo` solo por Edge Function, al menos un admin activo, `stock_actual` no editable a mano | ⏳ Pendiente de `db push` |
-| Edge Function `gestionar-usuarios` | Crear, activar y desactivar usuarios | ⏳ Pendiente de `npx supabase functions deploy gestionar-usuarios` |
+| `20261027122541_registrar_movimiento` | KAN-37: columnas `stock_anterior` y `stock_resultante`, función `registrar_movimiento`, los usuarios activos ven a sus compañeros | ✅ 10/11/2026 |
+| `20261109233502_dashboard_y_productos` | `producto.fecha_alta`, índices, vistas `v_producto` y `v_movimiento`, funciones `kpis_productos` y `dashboard_resumen` | ✅ 10/11/2026 |
+| `20261109235056_usuarios_y_roles` | `activo` solo por Edge Function, al menos un admin activo, `stock_actual` no editable a mano | ✅ 10/11/2026 |
+| `20261110011736_cuentas_nuevas_desactivadas` | Las cuentas que se registran solas entran desactivadas; solo entran activas las que crea un admin | ✅ 10/11/2026 |
+| Edge Function `gestionar-usuarios` | Crear, activar y desactivar usuarios | ✅ Publicada el 09/11/2026 y actualizada el 10/11/2026 (versión 2, con la marca `creado_por_admin`) |
 
 ---
 
@@ -773,21 +801,50 @@ Comparación con la rama `feature/database`: su `schema.sql` no coincide con la 
   - un trigger impide dejar el sistema sin un ADMINISTRADOR activo;
   - **`producto.stock_actual` ya no se puede editar a mano, ni siquiera el admin**: todo cambio de stock pasa por `registrar_movimiento` y queda en el historial. Al crear un producto sí se carga el stock inicial.
 - Diferencias entre roles documentadas en [Roles y permisos](#roles-y-permisos): el EMPLEADO consulta y registra ventas e ingresos; el ADMINISTRADOR además maneja el catálogo, los ajustes y los usuarios.
-- Pruebas: `prueba_usuarios_y_roles.sh`, 52/52 OK por HTTP. Se actualizó lo esperado en la prueba G de permisos: ahora la base rechaza con `permission denied` en lugar de modificar 0 filas.
+- Pruebas: `prueba_usuarios_y_roles.sh`, 52/52 OK por HTTP (65 desde el 10/11). Se actualizó lo esperado en la prueba G de permisos: ahora la base rechaza con `permission denied` en lugar de modificar 0 filas.
 
-**Estado al cierre:** todo está en la rama local `milagros`, **sin commit ni push**, y **nada aplicado** en Supabase. El front no se modificó.
+**Estado al cierre:** se subió a la rama `milagros` en GitHub y se publicó la Edge Function `gestionar-usuarios` en Supabase. Las migraciones **no** se aplicaron. El front no se modificó.
+
+### 10/11/2026 — Milagros Maldonado (rama `milagros`)
+
+**Problema.** El registro público de Supabase (*"Allow new users to sign up"*) está encendido y no se pudo apagar desde la cuenta de Milagros: el botón aparece bloqueado, seguramente por falta de permisos de Owner o Administrator. Con la clave pública del front, cualquiera podía crearse una cuenta, quedar como EMPLEADO activo, ver el inventario y, con KAN-37, registrar ventas. "Allow anonymous sign-ins" ya estaba apagado: ese no es el problema.
+
+**Solución desde la base** (`migrations/20261110011736_cuentas_nuevas_desactivadas.sql`)
+- El trigger que crea la fila en `usuario` ahora la deja **desactivada**, salvo que la cuenta tenga `creado_por_admin` en `app_metadata`, un dato que solo puede escribir el servidor.
+- La Edge Function `gestionar-usuarios` pone esa marca al crear usuarios, así que las cuentas del admin entran activas.
+- Las filas que ya existían no cambian.
+
+**Pruebas:** 13 casos nuevos en `prueba_usuarios_y_roles.sh`, incluido alguien que intenta ponerse la marca de admin al registrarse: 65/65 OK. Se ajustaron `datos_demo.sql`, `pruebas_registrar_movimiento.sql` y la prueba C de `pruebas_permisos.sql`, porque sus usuarios de prueba se crean directo en la base. Todas las suites siguen dando bien.
+
+**Aplicado en Supabase**
+- `npx supabase functions deploy gestionar-usuarios`: versión 2, con la marca `creado_por_admin`.
+- `npx supabase db push`: las 4 migraciones pendientes. El primer intento falló al conectarse (`EAUTHQUERY ... invalid secret format`) sin aplicar nada; el segundo intento terminó bien.
+- Antes de aplicar se verificó que hubiera 0 movimientos y una sola cuenta (el admin).
+- Verificado después en Supabase:
+  - las 6 migraciones figuran aplicadas;
+  - existen las funciones nuevas y las vistas, con `security_invoker`;
+  - `stock_actual` y `usuario.activo` no se pueden editar a mano;
+  - `anon` no puede registrar movimientos;
+  - los triggers están activos;
+  - el Admin Prueba sigue ADMINISTRADOR activo.
+
+**Revisor de seguridad en Supabase** (`npx supabase db advisors --linked`): 3 avisos, ninguno es un problema.
+- `registrar_movimiento` y `rol_actual` son `SECURITY DEFINER` y las puede llamar un usuario logueado. **Es a propósito:** son la forma de registrar movimientos y de saber el rol, y las dos validan quién llama.
+- *Leaked password protection* desactivado: es un ajuste de Authentication que rechaza contraseñas filtradas. Conviene activarlo si el plan lo permite (Authentication → Policies / Passwords); lo tiene que hacer alguien con permiso.
+
+**Estado al cierre:** todo aplicado en Supabase; los archivos, subidos a la rama `milagros`.
 
 ---
 
 ## Pendientes
 
-- [x] Commit y push de la rama `milagros` (hasta el 27/10).
-- [ ] Commit y push de los cambios del 09/11.
+- [x] Commit y push de la rama `milagros` (hasta el 09/11).
+- [x] Commit y push de los cambios del 10/11.
 - [ ] PR para que el equipo revise.
 - [x] Crear la cuenta de login de `admin@stockfx.com` (ver [Usuarios y login](#usuarios-y-login)).
-- [ ] **Apagar el registro público**: Dashboard de Supabase → Authentication → Sign In / Providers → desactivar "Allow new users to sign up".
-- [ ] Aplicar en Supabase `registrar_movimiento`, `dashboard_y_productos` y `usuarios_y_roles` (`npx supabase db push`).
-- [ ] Publicar la Edge Function: `npx supabase functions deploy gestionar-usuarios`.
+- [x] Proteger el sistema del registro público: las cuentas que se registran solas entran desactivadas (`cuentas_nuevas_desactivadas`).
+- [ ] Opcional: apagar el registro público. Lo tiene que hacer alguien con rol Owner o Administrator: Authentication → Sign In / Providers → "Allow new users to sign up".
+- [x] Volver a publicar la Edge Function (versión 2) y aplicar las 4 migraciones con `npx supabase db push` (10/11/2026).
 - [ ] Front: usar `dashboard_resumen` en el Dashboard, y `kpis_productos` + `v_producto` en Productos, en lugar de descargar todos los productos (ver [API para el front](#api-para-el-front)).
 - [x] Usuarios: forma de que el admin cree y desactive empleados desde la app (Edge Function `gestionar-usuarios`).
 - [ ] Front: pantalla de usuarios en Configuración (solo admin), usando `gestionar-usuarios`. Ocultar botones según el rol (`rpc('rol_actual')`).

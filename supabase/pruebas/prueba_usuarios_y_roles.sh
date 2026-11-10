@@ -76,6 +76,28 @@ check "Único admin activo se quita el rol"             "$(pedir PATCH "/rest/v1
 check "  mensaje"                                      "$(cuerpo message)" "Tiene que quedar al menos un administrador activo"
 
 echo
+echo "=============== ALGUIEN SE REGISTRA SOLO (registro público encendido) ==============="
+pedir GET "/rest/v1/producto?codigo=eq.COCA500&select=id_producto" "$ADMIN" >/dev/null
+COCA=$(cuerpo 0.id_producto)
+check "Desconocido se registra con la clave pública"   "$(pedir POST /auth/v1/signup "$ANON_KEY" '{"email":"intruso@gmail.com","password":"intruso-123"}')" 200
+INTRUSO=$(token intruso@gmail.com intruso-123)
+check "  puede iniciar sesión (Supabase lo permite)"   "$([ ${#INTRUSO} -gt 20 ] && echo si || echo no)" si
+pedir GET "/rest/v1/usuario?email=eq.intruso@gmail.com&select=rol,activo" "$ADMIN" >/dev/null
+check "  queda EMPLEADO y DESACTIVADO"                 "$(cuerpo 0.rol)/$(cuerpo 0.activo)" "EMPLEADO/false"
+INTRUSO_ID=$(pedir GET "/rest/v1/usuario?email=eq.intruso@gmail.com&select=id_usuario" "$ADMIN" >/dev/null; cuerpo 0.id_usuario)
+check "  NO ve productos"                              "$(pedir GET "/rest/v1/v_producto?select=codigo" "$INTRUSO")/$(cuerpo length)" "200/0"
+check "  NO ve KPIs"                                   "$(pedir POST /rest/v1/rpc/kpis_productos "$INTRUSO" '{}')" 400
+check "  mensaje"                                      "$(cuerpo message)" "No tenés permiso para ver el inventario (usuario sin cuenta o inactivo)"
+check "  NO puede registrar una venta"                 "$(pedir POST /rest/v1/rpc/registrar_movimiento "$INTRUSO" "{\"p_id_producto\":$COCA,\"p_tipo\":\"SALIDA\",\"p_cantidad\":1,\"p_motivo\":\"x\"}")" 400
+check "  mensaje"                                      "$(cuerpo message)" "No tenés permiso para registrar movimientos (usuario sin cuenta o inactivo)"
+check "  NO puede crear usuarios"                      "$(fn "$INTRUSO" '{"accion":"crear"}')" 403
+check "Otro se registra fingiendo ser admin"           "$(pedir POST /auth/v1/signup "$ANON_KEY" '{"email":"trampa@gmail.com","password":"trampa-123","data":{"creado_por_admin":true,"rol":"ADMINISTRADOR"}}')" 200
+pedir GET "/rest/v1/usuario?email=eq.trampa@gmail.com&select=rol,activo" "$ADMIN" >/dev/null
+check "  igual queda EMPLEADO y DESACTIVADO"           "$(cuerpo 0.rol)/$(cuerpo 0.activo)" "EMPLEADO/false"
+check "El admin lo activa desde la app"                "$(fn "$ADMIN" "{\"accion\":\"activar\",\"id_usuario\":\"$INTRUSO_ID\"}")" 200
+check "  recién ahí ve productos"                      "$(pedir GET "/rest/v1/v_producto?select=codigo&limit=1" "$INTRUSO")/$(cuerpo length)" "200/1"
+
+echo
 echo "=============== ADMINISTRADOR vs EMPLEADO ==============="
 pedir GET "/rest/v1/producto?codigo=eq.COCA500&select=id_producto" "$ADMIN" >/dev/null
 COCA=$(cuerpo 0.id_producto)

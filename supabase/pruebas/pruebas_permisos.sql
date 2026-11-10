@@ -18,8 +18,10 @@ select id_usuario, email, rol from public.usuario order by email;
 \echo '=== C. Alguien se registra pidiendo ser ADMINISTRADOR en sus datos'
 insert into auth.users (id, instance_id, aud, role, email, raw_user_meta_data, created_at, updated_at)
 values (:'emp_id', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'empleado@stockfx.com', '{"nombre":"Juan","apellido":"Perez","rol":"ADMINISTRADOR"}', now(), now());
-\echo '--> esperado: se crea como EMPLEADO igual'
-select id_usuario, nombre, apellido, email, rol from public.usuario order by email;
+\echo '--> esperado: se crea como EMPLEADO igual (y desde cuentas_nuevas_desactivadas: activo = false, porque se registró solo)'
+select id_usuario, nombre, apellido, email, rol, activo from public.usuario order by email;
+\echo '--> un admin lo activa (para las pruebas siguientes)'
+update public.usuario set activo = true where id_usuario = :'emp_id';
 
 \echo '=== D. Sin login (anon) leyendo productos --> esperado: permission denied'
 begin; set local role anon;

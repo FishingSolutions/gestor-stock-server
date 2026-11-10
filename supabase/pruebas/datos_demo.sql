@@ -21,7 +21,7 @@ insert into auth.users (
 )
 select id::uuid, '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated',
        email, extensions.crypt('demo-local-123', extensions.gen_salt('bf')), now(),
-       '{"provider":"email","providers":["email"]}', meta::jsonb, now(), now(),
+       '{"provider":"email","providers":["email"],"creado_por_admin":true}', meta::jsonb, now(), now(),
        '', '', '', ''
 from (values
   ('11111111-1111-1111-1111-111111111111', 'admin@stockfx.com',    '{"nombre":"Admin","apellido":"Prueba"}'),

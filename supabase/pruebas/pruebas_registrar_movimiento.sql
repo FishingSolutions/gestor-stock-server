@@ -7,10 +7,10 @@
 \set tres_id  '33333333-3333-3333-3333-333333333333'
 
 -- Preparación: cuentas de login (el trigger crea/vincula las filas de usuario)
-insert into auth.users (id, instance_id, aud, role, email, raw_user_meta_data, created_at, updated_at) values
-  (:'admin_id', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'admin@stockfx.com', '{}', now(), now()),
-  (:'emp_id',   '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'empleado@stockfx.com', '{"nombre":"Juan","apellido":"Perez"}', now(), now()),
-  (:'tres_id',  '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'inactivo@stockfx.com', '{}', now(), now());
+insert into auth.users (id, instance_id, aud, role, email, raw_user_meta_data, raw_app_meta_data, created_at, updated_at) values
+  (:'admin_id', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'admin@stockfx.com', '{}', '{"creado_por_admin":true}', now(), now()),
+  (:'emp_id',   '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'empleado@stockfx.com', '{"nombre":"Juan","apellido":"Perez"}', '{"creado_por_admin":true}', now(), now()),
+  (:'tres_id',  '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated', 'inactivo@stockfx.com', '{}', '{"creado_por_admin":true}', now(), now());
 update public.usuario set activo = false where id_usuario = :'tres_id';
 -- Un producto dado de baja para probar
 insert into public.producto (codigo, nombre, stock_actual, activo) values ('VIEJO', 'Producto discontinuado', 5, false);

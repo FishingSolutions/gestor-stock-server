@@ -114,6 +114,9 @@ async function crearUsuario(body: Record<string, unknown>) {
     password,
     email_confirm: true, // lo crea el admin: no hace falta confirmar por mail
     user_metadata: { nombre, apellido },
+    // Marca que solo puede poner el servidor: la base deja activas únicamente
+    // las cuentas creadas por un admin (las que se registran solas entran desactivadas)
+    app_metadata: { creado_por_admin: true },
   })
 
   if (error) {
@@ -125,10 +128,10 @@ async function crearUsuario(body: Record<string, unknown>) {
   }
 
   // El trigger de la base ya creó la fila en `usuario` como EMPLEADO.
-  // Acá se completan los datos y el rol elegido por el admin.
+  // Acá se completan los datos y el rol elegido por el admin, y queda activo.
   const { data: usuario, error: errorPerfil } = await admin
     .from('usuario')
-    .update({ nombre, apellido, rol })
+    .update({ nombre, apellido, rol, activo: true })
     .eq('id_usuario', data.user.id)
     .select(CAMPOS)
     .single()
