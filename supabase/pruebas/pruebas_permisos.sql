@@ -36,7 +36,7 @@ begin; set local role authenticated; select set_config('request.jwt.claims', jso
 insert into public.producto (codigo, nombre, stock_actual) values ('X1', 'Trucho', 1);
 rollback;
 
-\echo '=== G. EMPLEADO intenta cambiar stock directo --> esperado: 0 filas modificadas'
+\echo '=== G. EMPLEADO intenta cambiar stock directo --> esperado: 0 filas modificadas (desde usuarios_y_roles: permission denied)'
 begin; set local role authenticated; select set_config('request.jwt.claims', json_build_object('sub', :'emp_id', 'role', 'authenticated')::text, true);
 update public.producto set stock_actual = 999 where codigo = 'COCA500';
 rollback;
