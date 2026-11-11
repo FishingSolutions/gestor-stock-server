@@ -14,6 +14,18 @@ IMPORTANTE!  NO HACER COMMITS DIRECTOS AL MAIN
 La base de datos vive en Supabase y se maneja con migraciones en la carpeta `supabase/`.
 Cómo instalar la CLI, el esquema, los roles y permisos, cómo probar cambios en local y los problemas conocidos están en **[supabase/README.md](supabase/README.md)**.
 
+## Importar productos desde Excel
+
+El backend expone `POST /api/productos/importar` (multipart, campo `archivo`) para que un
+**ADMINISTRADOR** cargue una planilla `.xlsx` o `.xls`. Lee la hoja principal, valida cada fila,
+inserta las válidas en una sola transacción y devuelve un resumen con el detalle de los errores.
+
+- Guía completa (interfaz, modelo de datos, casos de uso, diagrama y paso a paso):
+  **[docs/importar-productos/README.md](docs/importar-productos/README.md)**
+- Plantilla para descargar: `GET /api/productos/importar/plantilla`
+- Ejemplos listos para probar: `docs/importar-productos/ejemplos/`
+- Pruebas: `npm test` (no necesitan Supabase ni Docker)
+
 ## Instalación local
 
 1. Clonar el repositorio:

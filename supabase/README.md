@@ -38,7 +38,8 @@ supabase/
 │   ├── 20261027122541_registrar_movimiento.sql   KAN-37: función para registrar movimientos
 │   ├── 20261109233502_dashboard_y_productos.sql  Datos del Dashboard y de la vista Productos
 │   ├── 20261109235056_usuarios_y_roles.sql       Reglas de usuarios y stock solo por movimientos
-│   └── 20261110011736_cuentas_nuevas_desactivadas.sql  Quien se registra solo entra desactivado
+│   ├── 20261110011736_cuentas_nuevas_desactivadas.sql  Quien se registra solo entra desactivado
+│   └── 20261111120000_importacion_productos.sql  Historial de importaciones desde Excel
 ├── functions/
 │   └── gestionar-usuarios/index.ts    Edge Function: el admin crea, activa y desactiva usuarios
 ├── pruebas/
@@ -430,6 +431,25 @@ if (error) {
 npx supabase functions deploy gestionar-usuarios
 ```
 
+### 9. Importar productos desde Excel (API del backend)
+La importación masiva la hace el servidor Express (`src/server.js`), no PostgREST: necesita leer el
+archivo, validar fila por fila y guardar todo en una transacción. El endpoint exige sesión de
+**ADMINISTRADOR** activo (valida el access token y lee el rol de la tabla `usuario`).
+
+```bash
+curl -X POST http://localhost:4000/api/productos/importar \
+  -H "Authorization: Bearer <access_token>" \
+  -F "archivo=@productos.xlsx"
+```
+
+La migración `20261111120000_importacion_productos` agrega las tablas de historial
+(`importacion_producto`, `importacion_producto_error`), que el admin puede leer y nadie puede
+escribir desde el front. **La importación funciona sin esa migración**; lo único que se pierde es
+el historial en la base (queda en los logs del servidor).
+
+Guía completa —interfaz, modelo, casos de uso, diagrama y paso a paso— en
+**[docs/importar-productos/README.md](../docs/importar-productos/README.md)**.
+
 ---
 
 ## Usuarios y login
@@ -692,6 +712,7 @@ bash supabase/pruebas/prueba_usuarios_y_roles.sh
 | `20261109233502_dashboard_y_productos` | `producto.fecha_alta`, índices, vistas `v_producto` y `v_movimiento`, funciones `kpis_productos` y `dashboard_resumen` | ✅ 10/11/2026 |
 | `20261109235056_usuarios_y_roles` | `activo` solo por Edge Function, al menos un admin activo, `stock_actual` no editable a mano | ✅ 10/11/2026 |
 | `20261110011736_cuentas_nuevas_desactivadas` | Las cuentas que se registran solas entran desactivadas; solo entran activas las que crea un admin | ✅ 10/11/2026 |
+| `20261111120000_importacion_productos` | Historial de importaciones desde Excel: `importacion_producto` e `importacion_producto_error` (solo lectura para el admin) | ⏳ pendiente (la importación funciona sin aplicarla) |
 | Edge Function `gestionar-usuarios` | Crear, activar y desactivar usuarios | ✅ Publicada el 09/11/2026 y actualizada el 10/11/2026 (versión 2, con la marca `creado_por_admin`) |
 
 ---
