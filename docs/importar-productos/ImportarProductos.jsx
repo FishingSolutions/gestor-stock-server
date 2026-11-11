@@ -9,10 +9,11 @@
 //        <Route path="/productos/importar" element={<ImportarProductos ... />} />
 //   3. Pasarle el token de la sesión de Supabase y un callback para refrescar:
 //        <ImportarProductos token={session.access_token} onImportado={refrescar} />
-//   4. Definir VITE_API_URL en `.env.local` (por defecto http://localhost:4000).
+//   4. Usa VITE_SUPABASE_URL y VITE_SUPABASE_ANON_KEY, que el front ya tiene en `.env`.
 //
-// No incluye la lógica de sesión: el token se recibe por prop para no acoplar
-// esta pantalla al proveedor de autenticación que use el front.
+// Llama a la Edge Function `importar-productos` de Supabase (no hace falta
+// ningún servidor aparte). El token se recibe por prop para no acoplar esta
+// pantalla al proveedor de autenticación que use el front.
 // =====================================================================
 
 import { useMemo, useRef, useState } from 'react';
@@ -27,7 +28,12 @@ import {
   X,
 } from 'lucide-react';
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://localhost:4000';
+// Edge Function de Supabase: POST importa, GET descarga la plantilla
+const URL_IMPORTAR = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/importar-productos`;
+const encabezados = (token) => ({
+  apikey: import.meta.env.VITE_SUPABASE_ANON_KEY,
+  ...(token ? { Authorization: `Bearer ${token}` } : {}),
+});
 const MAX_MB = 5;
 const TIPOS_ACEPTADOS = ['.xlsx', '.xls'];
 
@@ -112,9 +118,9 @@ export default function ImportarProductos({ token, onImportado }) {
     datos.append('archivo', archivo);
 
     try {
-      const respuesta = await fetch(`${API_URL}/api/productos/importar`, {
+      const respuesta = await fetch(URL_IMPORTAR, {
         method: 'POST',
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        headers: encabezados(token),
         body: datos,
       });
 
@@ -140,9 +146,7 @@ export default function ImportarProductos({ token, onImportado }) {
 
   async function descargarPlantilla() {
     try {
-      const respuesta = await fetch(`${API_URL}/api/productos/importar/plantilla`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      });
+      const respuesta = await fetch(URL_IMPORTAR, { headers: encabezados(token) });
 
       if (!respuesta.ok) throw new Error('no');
 

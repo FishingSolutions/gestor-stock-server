@@ -39,9 +39,13 @@ supabase/
 │   ├── 20261109233502_dashboard_y_productos.sql  Datos del Dashboard y de la vista Productos
 │   ├── 20261109235056_usuarios_y_roles.sql       Reglas de usuarios y stock solo por movimientos
 │   ├── 20261110011736_cuentas_nuevas_desactivadas.sql  Quien se registra solo entra desactivado
-│   └── 20261111120000_importacion_productos.sql  Historial de importaciones desde Excel
+│   ├── 20261111120000_importacion_productos.sql  Historial de importaciones desde Excel
+│   └── 20261111193423_importar_productos.sql     Función importar_productos (inserta en una transacción)
 ├── functions/
-│   └── gestionar-usuarios/index.ts    Edge Function: el admin crea, activa y desactiva usuarios
+│   ├── gestionar-usuarios/index.ts    Edge Function: el admin crea, activa y desactiva usuarios
+│   └── importar-productos/            Edge Function: importar productos desde Excel
+│       ├── index.ts                   HTTP: sesión de admin, archivo, plantilla
+│       └── excel.ts                   Lectura y validación del Excel (sin base ni red)
 ├── pruebas/
 │   ├── simular_base_actual.sql            Carga datos de ejemplo como los de Supabase
 │   ├── pruebas_permisos.sql               17 pruebas de roles, permisos y borrados
@@ -50,7 +54,8 @@ supabase/
 │   ├── datos_demo.sql                     Usuarios, productos y movimientos de demo (solo local)
 │   ├── pruebas_dashboard.sql              47 pruebas del Dashboard y la vista Productos
 │   ├── prueba_rendimiento.sql             5.000 productos y 100.000 movimientos: mide tiempos
-│   └── prueba_usuarios_y_roles.sh         65 pruebas por la API: usuarios, registro propio y ADMIN vs EMPLEADO
+│   ├── prueba_usuarios_y_roles.sh         65 pruebas por la API: usuarios, registro propio y ADMIN vs EMPLEADO
+│   └── prueba_importacion.sh              45 pruebas por la API: importar productos desde Excel
 └── .temp/                   Datos locales de la CLI (NO se sube, está en .gitignore)
 ```
 
@@ -431,24 +436,83 @@ if (error) {
 npx supabase functions deploy gestionar-usuarios
 ```
 
-### 9. Importar productos desde Excel (API del backend)
-La importación masiva la hace el servidor Express (`src/server.js`), no PostgREST: necesita leer el
-archivo, validar fila por fila y guardar todo en una transacción. El endpoint exige sesión de
-**ADMINISTRADOR** activo (valida el access token y lee el rol de la tabla `usuario`).
+### 9. Importar productos desde Excel: Edge Function `importar-productos` (solo ADMINISTRADOR)
+Todo corre en Supabase, sin servidor aparte:
 
-```bash
-curl -X POST http://localhost:4000/api/productos/importar \
-  -H "Authorization: Bearer <access_token>" \
-  -F "archivo=@productos.xlsx"
+```
+front --(archivo)--> Edge Function importar-productos    lee el Excel y valida cada fila
+                     --(productos válidos)--> rpc('importar_productos')
+                                              revisa otra vez, crea categorías, inserta en
+                                              UNA transacción y guarda el historial
 ```
 
-La migración `20261111120000_importacion_productos` agrega las tablas de historial
-(`importacion_producto`, `importacion_producto_error`), que el admin puede leer y nadie puede
-escribir desde el front. **La importación funciona sin esa migración**; lo único que se pierde es
-el historial en la base (queda en los logs del servidor).
+```js
+// Importar
+const datos = new FormData()
+datos.append('archivo', archivo)        // File del <input type="file" accept=".xlsx,.xls">
+// datos.append('hoja', 'Productos')    // opcional: por defecto, la primera hoja
+const { data, error } = await supabase.functions.invoke('importar-productos', { body: datos })
 
-Guía completa —interfaz, modelo, casos de uso, diagrama y paso a paso— en
-**[docs/importar-productos/README.md](../docs/importar-productos/README.md)**.
+if (error) {
+  const cuerpo = await error.context.json()    // { ok:false, error:{ codigo, mensaje, detalles } }
+  mostrarAviso(cuerpo.error.mensaje)
+}
+
+// Descargar la plantilla (.xlsx): GET a la misma función
+const r = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/importar-productos`, {
+  headers: { apikey: import.meta.env.VITE_SUPABASE_ANON_KEY, Authorization: `Bearer ${session.access_token}` },
+})
+const plantilla = await r.blob()
+```
+
+**Respuesta** (200):
+```js
+{
+  ok: true,
+  estado: 'COMPLETADA' | 'COMPLETADA_CON_ERRORES' | 'RECHAZADA',   // RECHAZADA = no entró ninguno
+  idImportacion: 12,
+  archivo: { nombre, tamanoBytes, hoja, hojas, filaEncabezado, columnasIgnoradas },
+  fecha, duracionMs,
+  resumen: { registrosProcesados, productosImportados, registrosConError, erroresEncontrados,
+             filasVacias, categoriasNuevas },
+  importados: [{ fila: 2, codigo: 'P001', idProducto: 31 }],
+  errores:    [{ fila: 3, codigo: 'P002', campo: 'stock', mensaje: 'El stock no puede ser negativo.' }]
+}
+```
+
+**Formato del Excel:** `.xlsx` o `.xls`, hasta 5 MB y 2.000 filas, primera hoja (o la que se pida). Puede haber filas de título arriba del encabezado. Las columnas van en cualquier orden y sin importar mayúsculas ni acentos:
+
+| Columna | ¿Obligatoria? | También acepta | Regla |
+|---|:-:|---|---|
+| Codigo | ✅ | SKU, Cod, Código artículo | único (en el Excel y en la base, sin distinguir mayúsculas) |
+| Descripcion | ✅ | Nombre, Producto | es el nombre del producto |
+| Stock | ✅ | Cantidad, Existencias, Unidades | entero, 0 o más |
+| Precio | ✅ | Precio venta, PVP, Importe | mayor que 0 |
+| Categoria | | Rubro, Familia | si no existe, se crea |
+| Costo | | Precio costo, Precio compra | 0 o más |
+| Detalle | | Observaciones, Notas | descripción larga |
+
+- Los números se aceptan como `15000`, `15.000`, `$ 1.500,50` o `1,500.50`. Las filas vacías se ignoran.
+- Las filas con errores no entran; las correctas sí. Si falla la base, no entra **ninguna**.
+- Los productos entran **activos**, con su stock inicial y stock mínimo/máximo en 0.
+
+**Errores del archivo** (respuesta 4xx, `error.codigo`):
+
+| Código | Cuándo |
+|---|---|
+| 401 `SIN_SESION` / 403 `SOLO_ADMINISTRADOR` | sin sesión / no es admin activo |
+| 400 `SIN_ARCHIVO` | no vino el campo `archivo` |
+| 415 `TIPO_NO_PERMITIDO` | no es `.xlsx` ni `.xls` |
+| 413 `ARCHIVO_MUY_GRANDE` | más de 5 MB |
+| 400 `ARCHIVO_ILEGIBLE`, `ARCHIVO_VACIO`, `HOJA_VACIA`, `HOJA_INEXISTENTE` | el archivo no se puede leer |
+| 400 `ENCABEZADO_NO_ENCONTRADO`, `COLUMNAS_FALTANTES` | faltan columnas obligatorias |
+| 400 `SIN_FILAS`, `DEMASIADAS_FILAS` | sin datos o más de 2.000 filas |
+
+**Historial** (solo el admin lo puede leer): `supabase.from('importacion_producto').select('*').order('fecha', { ascending: false })` y el detalle de errores en `importacion_producto_error`. También quedan registrados los archivos rechazados.
+
+**Publicar:** `npx supabase functions deploy importar-productos`
+
+Diseño completo (modelo de datos, casos de uso, diagramas, interfaz y paso a paso): [docs/importar-productos/README.md](../docs/importar-productos/README.md).
 
 ---
 
@@ -712,7 +776,9 @@ bash supabase/pruebas/prueba_usuarios_y_roles.sh
 | `20261109233502_dashboard_y_productos` | `producto.fecha_alta`, índices, vistas `v_producto` y `v_movimiento`, funciones `kpis_productos` y `dashboard_resumen` | ✅ 10/11/2026 |
 | `20261109235056_usuarios_y_roles` | `activo` solo por Edge Function, al menos un admin activo, `stock_actual` no editable a mano | ✅ 10/11/2026 |
 | `20261110011736_cuentas_nuevas_desactivadas` | Las cuentas que se registran solas entran desactivadas; solo entran activas las que crea un admin | ✅ 10/11/2026 |
-| `20261111120000_importacion_productos` | Historial de importaciones desde Excel: `importacion_producto` e `importacion_producto_error` (solo lectura para el admin) | ⏳ pendiente (la importación funciona sin aplicarla) |
+| `20261111120000_importacion_productos` | Historial de importaciones desde Excel: `importacion_producto` e `importacion_producto_error` (solo lectura para el admin) | ⏳ Pendiente de `db push` |
+| `20261111193423_importar_productos` | Función `importar_productos`: valida, crea categorías, inserta en una transacción y guarda el historial | ⏳ Pendiente de `db push` (necesita la anterior) |
+| Edge Function `importar-productos` | Lee y valida el Excel, llama a `importar_productos`, descarga de plantilla | ⏳ Pendiente de `npx supabase functions deploy importar-productos` (después del `db push`) |
 | Edge Function `gestionar-usuarios` | Crear, activar y desactivar usuarios | ✅ Publicada el 09/11/2026 y actualizada el 10/11/2026 (versión 2, con la marca `creado_por_admin`) |
 
 ---
@@ -855,6 +921,21 @@ Comparación con la rama `feature/database`: su `schema.sql` no coincide con la 
 
 **Estado al cierre:** todo aplicado en Supabase; los archivos, subidos a la rama `milagros`.
 
+### 11/11/2026 — Milagros Maldonado (rama `milagros`)
+
+**Importar productos desde Excel, en Supabase.** Se había agregado un importador en el servidor Express (`src/modules/productos/importacion`). Para no depender de un servidor aparte con `DATABASE_URL`, se pasó a Supabase con las mismas reglas y el mismo formato de respuesta:
+- **Edge Function `importar-productos`:**
+  - `excel.ts` es la lectura y validación del Excel, portada del importador de Express: alias de columnas, números con formato argentino, filas de título arriba del encabezado, repetidos y firma real del archivo;
+  - `index.ts` exige sesión de admin activo, recibe el archivo (hasta 5 MB) y ofrece la plantilla por GET. Corre con la sesión del usuario, nunca con la clave secreta.
+- **Migración `20261111193423_importar_productos`:** función `importar_productos`, solo para ADMINISTRADOR. Vuelve a validar cada producto (por si alguien la llama directo), rechaza códigos repetidos o ya existentes sin distinguir mayúsculas, crea las categorías que falten, inserta los válidos en **una transacción** y guarda el historial con el detalle de errores.
+- Al probar apareció que Supabase rechaza `UPDATE` sin `WHERE` en llamadas por la API (`pg_safeupdate`): se corrigió la función.
+- Pruebas: `prueba_importacion.sh`, **45/45 OK** por HTTP. Incluyen la planilla de ejemplo del repo, la de errores, formatos argentinos, `.xls`, archivos inválidos, la defensa en la base y el historial. Las demás suites (65 de usuarios, 47 del dashboard, movimientos, ventas simultáneas) y `npm test` (65) siguen bien; `db advisors` sin problemas.
+- `docs/importar-productos/ImportarProductos.jsx` ahora llama a la Edge Function.
+- **Se borró el importador de Express**: `src/modules`, `src/config`, `src/lib`, `src/middleware` y `test/`, que solo usaba él. `src/server.js` y `.env.example` volvieron a como estaban. Se sacaron del `package.json` `jose`, `multer` y `pglite`; `xlsx` 0.20.3 pasó a desarrollo, porque la usan las pruebas y `npm run generar-ejemplos`. `npm audit`: 0 vulnerabilidades. Queda en el historial de git (commit `2de8e05`) por si alguna vez hace falta.
+- `docs/importar-productos/README.md` se reescribió para la versión de Supabase.
+
+**Estado al cierre:** en la rama local `milagros`. Falta aplicar en Supabase (ver Pendientes).
+
 ---
 
 ## Pendientes
@@ -866,6 +947,8 @@ Comparación con la rama `feature/database`: su `schema.sql` no coincide con la 
 - [x] Proteger el sistema del registro público: las cuentas que se registran solas entran desactivadas (`cuentas_nuevas_desactivadas`).
 - [ ] Opcional: apagar el registro público. Lo tiene que hacer alguien con rol Owner o Administrator: Authentication → Sign In / Providers → "Allow new users to sign up".
 - [x] Volver a publicar la Edge Function (versión 2) y aplicar las 4 migraciones con `npx supabase db push` (10/11/2026).
+- [ ] **Importar desde Excel, en este orden:** 1) `npx supabase db push` (2 migraciones: `importacion_productos` e `importar_productos`); 2) `npx supabase functions deploy importar-productos`.
+- [x] Borrar el importador de Express: queda solo la versión de Supabase.
 - [ ] Front: usar `dashboard_resumen` en el Dashboard, y `kpis_productos` + `v_producto` en Productos, en lugar de descargar todos los productos (ver [API para el front](#api-para-el-front)).
 - [x] Usuarios: forma de que el admin cree y desactive empleados desde la app (Edge Function `gestionar-usuarios`).
 - [ ] Front: pantalla de usuarios en Configuración (solo admin), usando `gestionar-usuarios`. Ocultar botones según el rol (`rpc('rol_actual')`).

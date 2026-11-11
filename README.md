@@ -16,15 +16,16 @@ Cómo instalar la CLI, el esquema, los roles y permisos, cómo probar cambios en
 
 ## Importar productos desde Excel
 
-El backend expone `POST /api/productos/importar` (multipart, campo `archivo`) para que un
-**ADMINISTRADOR** cargue una planilla `.xlsx` o `.xls`. Lee la hoja principal, valida cada fila,
-inserta las válidas en una sola transacción y devuelve un resumen con el detalle de los errores.
+Un **ADMINISTRADOR** carga una planilla `.xlsx` o `.xls`: se lee la hoja principal, se valida cada fila,
+las válidas se insertan en una sola transacción y se devuelve un resumen con el detalle de los errores.
 
-- Guía completa (interfaz, modelo de datos, casos de uso, diagrama y paso a paso):
-  **[docs/importar-productos/README.md](docs/importar-productos/README.md)**
-- Plantilla para descargar: `GET /api/productos/importar/plantilla`
-- Ejemplos listos para probar: `docs/importar-productos/ejemplos/`
-- Pruebas: `npm test` (no necesitan Supabase ni Docker)
+Corre en **Supabase**, sin servidor aparte: es la Edge Function `importar-productos` más la función
+SQL `importar_productos`.
+- Uso desde el front, formato del Excel y errores: **[supabase/README.md](supabase/README.md)**, sección "9. Importar productos desde Excel".
+- Diseño completo (modelo de datos, casos de uso, diagramas, interfaz, paso a paso): **[docs/importar-productos/README.md](docs/importar-productos/README.md)**.
+- Pantalla de ejemplo para el front: `docs/importar-productos/ImportarProductos.jsx`.
+- Planillas de ejemplo: `docs/importar-productos/ejemplos/` (se regeneran con `npm run generar-ejemplos`).
+- Pruebas: `bash supabase/pruebas/prueba_importacion.sh` (base local).
 
 ## Instalación local
 

@@ -420,3 +420,7 @@ enabled = true
 # además verifica que sea un ADMINISTRADOR activo).
 [functions.gestionar-usuarios]
 verify_jwt = true
+
+# Edge Function para importar productos desde Excel (solo ADMINISTRADOR).
+[functions.importar-productos]
+verify_jwt = true
