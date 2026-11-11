@@ -378,6 +378,23 @@ if (error) {
 
 **Ventas simultáneas:** la función bloquea el producto mientras registra. Si dos personas venden el mismo producto al mismo tiempo, la segunda espera a la primera y ve el stock ya descontado. Así nunca queda negativo (probado con `pruebas/prueba_ventas_simultaneas.sh`).
 
+### 7b. Ajustar stock: `ajustar_stock` (solo ADMINISTRADOR)
+Para corregir el stock indicando **cuánto sube o baja** y por qué (rotura, vencimiento, recuento). Queda en el historial como `AJUSTE`, con stock anterior y resultante.
+```js
+const { data, error } = await supabase.rpc("ajustar_stock", {
+  p_id_producto: 12,
+  p_diferencia: -5,                  // negativo baja, positivo sube (distinto de 0)
+  p_motivo: "Rotura: se cayó una caja"
+})
+// data = el movimiento registrado (igual que registrar_movimiento)
+```
+| Mensaje de error | Cuándo |
+|---|---|
+| `Solo un administrador puede hacer ajustes de stock` | lo intenta un EMPLEADO |
+| `El ajuste dejaría el stock en negativo: hay X, se quieren restar Y` | baja más de lo que hay |
+| `Indicá cuántas unidades sube o baja el stock (distinto de 0)` | `p_diferencia` es 0 o vacío |
+| `El motivo es obligatorio` / `El producto no existe` / `El producto "…" está dado de baja` | igual que en `registrar_movimiento` |
+
 ### 8. Gestionar usuarios: Edge Function `gestionar-usuarios` (solo ADMINISTRADOR)
 Crear cuentas de login necesita la clave secreta de Supabase, que no puede estar en el front. Por eso esto lo hace una **Edge Function**, que corre en el servidor de Supabase. Antes de hacer nada, verifica que quien la llama sea un ADMINISTRADOR activo.
 
@@ -776,9 +793,10 @@ bash supabase/pruebas/prueba_usuarios_y_roles.sh
 | `20261109233502_dashboard_y_productos` | `producto.fecha_alta`, índices, vistas `v_producto` y `v_movimiento`, funciones `kpis_productos` y `dashboard_resumen` | ✅ 10/11/2026 |
 | `20261109235056_usuarios_y_roles` | `activo` solo por Edge Function, al menos un admin activo, `stock_actual` no editable a mano | ✅ 10/11/2026 |
 | `20261110011736_cuentas_nuevas_desactivadas` | Las cuentas que se registran solas entran desactivadas; solo entran activas las que crea un admin | ✅ 10/11/2026 |
-| `20261111120000_importacion_productos` | Historial de importaciones desde Excel: `importacion_producto` e `importacion_producto_error` (solo lectura para el admin) | ⏳ Pendiente de `db push` |
-| `20261111193423_importar_productos` | Función `importar_productos`: valida, crea categorías, inserta en una transacción y guarda el historial | ⏳ Pendiente de `db push` (necesita la anterior) |
-| Edge Function `importar-productos` | Lee y valida el Excel, llama a `importar_productos`, descarga de plantilla | ⏳ Pendiente de `npx supabase functions deploy importar-productos` (después del `db push`) |
+| `20261111120000_importacion_productos` | Historial de importaciones desde Excel: `importacion_producto` e `importacion_producto_error` (solo lectura para el admin) | ✅ 11/11/2026 |
+| `20261111193423_importar_productos` | Función `importar_productos`: valida, crea categorías, inserta en una transacción y guarda el historial | ✅ 11/11/2026 |
+| Edge Function `importar-productos` | Lee y valida el Excel, llama a `importar_productos`, descarga de plantilla | ✅ Publicada el 11/11/2026 |
+| `20261111195627_ajustar_stock` | Función `ajustar_stock`: el admin sube o baja el stock indicando cantidad y motivo | ⏳ Pendiente de `npx supabase db push` |
 | Edge Function `gestionar-usuarios` | Crear, activar y desactivar usuarios | ✅ Publicada el 09/11/2026 y actualizada el 10/11/2026 (versión 2, con la marca `creado_por_admin`) |
 
 ---
@@ -940,6 +958,8 @@ Comparación con la rama `feature/database`: su `schema.sql` no coincide con la 
 
 ## Pendientes
 
+- [ ] Aplicar `ajustar_stock` en Supabase: `npx supabase db push` (probado en local el 11/11/2026).
+
 - [x] Commit y push de la rama `milagros` (hasta el 09/11).
 - [x] Commit y push de los cambios del 10/11.
 - [ ] PR para que el equipo revise.
@@ -947,7 +967,7 @@ Comparación con la rama `feature/database`: su `schema.sql` no coincide con la 
 - [x] Proteger el sistema del registro público: las cuentas que se registran solas entran desactivadas (`cuentas_nuevas_desactivadas`).
 - [ ] Opcional: apagar el registro público. Lo tiene que hacer alguien con rol Owner o Administrator: Authentication → Sign In / Providers → "Allow new users to sign up".
 - [x] Volver a publicar la Edge Function (versión 2) y aplicar las 4 migraciones con `npx supabase db push` (10/11/2026).
-- [ ] **Importar desde Excel, en este orden:** 1) `npx supabase db push` (2 migraciones: `importacion_productos` e `importar_productos`); 2) `npx supabase functions deploy importar-productos`.
+- [x] **Importar desde Excel (aplicado el 11/11/2026):** 1) `npx supabase db push` (2 migraciones: `importacion_productos` e `importar_productos`); 2) `npx supabase functions deploy importar-productos`.
 - [x] Borrar el importador de Express: queda solo la versión de Supabase.
 - [ ] Front: usar `dashboard_resumen` en el Dashboard, y `kpis_productos` + `v_producto` en Productos, en lugar de descargar todos los productos (ver [API para el front](#api-para-el-front)).
 - [x] Usuarios: forma de que el admin cree y desactive empleados desde la app (Edge Function `gestionar-usuarios`).
