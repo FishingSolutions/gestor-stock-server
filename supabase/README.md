@@ -147,7 +147,7 @@ Los movimientos solo se crean con la función [`registrar_movimiento`](#7-regist
 | `rol` | varchar(20) | `ADMINISTRADOR` o `EMPLEADO` (por defecto `EMPLEADO`) |
 
 ### Borrados (historial protegido)
-- **No se puede borrar un producto que tenga movimientos.** Para sacarlo de la lista se usa `activo = false`.
+- **Los productos no se borran de verdad (borrado lógico):** al borrar uno, queda marcado como `eliminado` (con fecha y quién lo hizo), desaparece de las listas y conserva su historial. Ver [Borrar productos](#7c-borrar-productos-borrado-lógico).
 - **No se puede borrar un usuario que tenga movimientos.** Se desactiva con `activo = false`.
 - Los movimientos no se modifican ni se borran: son el historial.
 
@@ -177,7 +177,7 @@ La seguridad está en la base con **RLS** (Row Level Security) y permisos por co
 | Crear productos (con su stock inicial) | ❌ | ❌ | ✅ |
 | Editar productos (precio, nombre, mínimo, categoría…) | ❌ | ❌ | ✅ |
 | Dar de baja / reactivar productos (`activo`) | ❌ | ❌ | ✅ |
-| Borrar productos (solo si no tienen movimientos) | ❌ | ❌ | ✅ |
+| Borrar productos (borrado lógico) y restaurarlos | ❌ | ❌ | ✅ |
 | Crear / editar / borrar categorías | ❌ | ❌ | ✅ |
 | **Usuarios** | | | |
 | Crear usuarios (`gestionar-usuarios`) | ❌ | ❌ | ✅ |
@@ -394,6 +394,19 @@ const { data, error } = await supabase.rpc("ajustar_stock", {
 | `El ajuste dejaría el stock en negativo: hay X, se quieren restar Y` | baja más de lo que hay |
 | `Indicá cuántas unidades sube o baja el stock (distinto de 0)` | `p_diferencia` es 0 o vacío |
 | `El motivo es obligatorio` / `El producto no existe` / `El producto "…" está dado de baja` | igual que en `registrar_movimiento` |
+
+### 7c. Borrar productos (borrado lógico)
+El front borra igual que siempre; la base **no elimina la fila**, sino que la marca como eliminada:
+```js
+await supabase.from("producto").delete().eq("id_producto", id)              // solo ADMINISTRADOR
+await supabase.rpc("restaurar_producto", { p_id_producto: id })            // deshacer (solo ADMINISTRADOR)
+```
+- Columnas nuevas en `producto`: `eliminado`, `fecha_eliminacion`, `id_usuario_eliminacion`.
+- Un producto eliminado **no aparece** en `v_producto`, `kpis_productos` ni `dashboard_resumen`, **sus movimientos siguen** en `v_movimiento` y **no se le pueden registrar movimientos**.
+- Ahora se puede borrar aunque tenga movimientos (antes daba error).
+- ⚠️ Si el front lee la tabla `producto` directo, tiene que filtrar `.eq("eliminado", false)` (o usar `v_producto`, que ya los excluye).
+- El código de un producto eliminado sigue ocupado: para volver a usarlo, restaurar el producto.
+- Nadie puede cambiar `eliminado` a mano: solo con el DELETE o con `restaurar_producto`.
 
 ### 8. Gestionar usuarios: Edge Function `gestionar-usuarios` (solo ADMINISTRADOR)
 Crear cuentas de login necesita la clave secreta de Supabase, que no puede estar en el front. Por eso esto lo hace una **Edge Function**, que corre en el servidor de Supabase. Antes de hacer nada, verifica que quien la llama sea un ADMINISTRADOR activo.
@@ -795,6 +808,7 @@ bash supabase/pruebas/prueba_usuarios_y_roles.sh
 | `20261110011736_cuentas_nuevas_desactivadas` | Las cuentas que se registran solas entran desactivadas; solo entran activas las que crea un admin | ✅ 10/11/2026 |
 | `20261111120000_importacion_productos` | Historial de importaciones desde Excel: `importacion_producto` e `importacion_producto_error` (solo lectura para el admin) | ✅ 11/11/2026 |
 | `20261111193423_importar_productos` | Función `importar_productos`: valida, crea categorías, inserta en una transacción y guarda el historial | ✅ 11/11/2026 |
+| `20261116230502_borrado_logico_productos` | Borrado lógico de productos y `restaurar_producto` | ⏳ Pendiente de `npx supabase db push` |
 | Edge Function `importar-productos` | Lee y valida el Excel, llama a `importar_productos`, descarga de plantilla | ✅ Publicada el 11/11/2026 |
 | `20261111195627_ajustar_stock` | Función `ajustar_stock`: el admin sube o baja el stock indicando cantidad y motivo | ⏳ Pendiente de `npx supabase db push` |
 | Edge Function `gestionar-usuarios` | Crear, activar y desactivar usuarios | ✅ Publicada el 09/11/2026 y actualizada el 10/11/2026 (versión 2, con la marca `creado_por_admin`) |
@@ -957,6 +971,8 @@ Comparación con la rama `feature/database`: su `schema.sql` no coincide con la 
 ---
 
 ## Pendientes
+
+- [ ] Aplicar el borrado lógico en Supabase: `npx supabase db push` (probado en local el 16/11/2026: 13 pruebas en `prueba_borrado_logico.sh` + todas las suites anteriores OK). Avisar al front que filtre `eliminado = false` si lee `producto` directo.
 
 - [ ] Aplicar `ajustar_stock` en Supabase: `npx supabase db push` (probado en local el 11/11/2026).
 

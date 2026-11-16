@@ -124,8 +124,8 @@ check "ADMIN: cambiar precio"                          "$(pedir PATCH "/rest/v1/
 check "ADMIN: dar de baja un producto"                     "$(pedir PATCH "/rest/v1/producto?id_producto=eq.$PRUEBA" "$ADMIN" '{"activo":false}')/$(cuerpo 0.activo)" "200/false"
 check "ADMIN: cambiar stock a mano"                    "$(pedir PATCH "/rest/v1/producto?id_producto=eq.$COCA" "$ADMIN" '{"stock_actual":999}')" 403
 check "ADMIN: AJUSTE por conteo"                       "$(pedir POST /rest/v1/rpc/registrar_movimiento "$ADMIN" "{\"p_id_producto\":$COCA,\"p_tipo\":\"AJUSTE\",\"p_cantidad\":48,\"p_motivo\":\"Conteo físico\"}")/$(cuerpo stock_resultante)" "200/48"
-check "ADMIN: borrar producto SIN movimientos"         "$(pedir DELETE "/rest/v1/producto?id_producto=eq.$PRUEBA" "$ADMIN")/$(cuerpo length)" "200/1"
-check "ADMIN: borrar producto CON movimientos"         "$(pedir DELETE "/rest/v1/producto?id_producto=eq.$COCA" "$ADMIN")" 409
+check "ADMIN: borrar producto SIN movimientos (lógico)" "$(pedir DELETE "/rest/v1/producto?id_producto=eq.$PRUEBA" "$ADMIN")/$(cuerpo length)" "200/0"
+check "ADMIN: borrar producto CON movimientos (lógico)" "$(pedir DELETE "/rest/v1/producto?id_producto=eq.$COCA" "$ADMIN")" 200
 
 echo
 echo "TOTAL: $((OK+FALLO)) pruebas, $OK OK, $FALLO FALLO"

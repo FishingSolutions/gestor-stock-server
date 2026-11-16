@@ -85,14 +85,14 @@ insert into public.movimiento_stock (id_producto, tipo_movimiento, cantidad, mot
 select id_producto, 'ENTRADA', 1, 'x', 10, 11 from public.producto limit 1;
 rollback;
 
-\echo '=== O. Borrar un producto con movimientos --> esperado: error de foreign key'
+\echo '=== O. Borrar un producto con movimientos --> esperado: error de foreign key (desde borrado_logico_productos: DELETE 0, queda marcado como eliminado)'
 begin;
 insert into public.movimiento_stock (id_producto, id_usuario, tipo_movimiento, cantidad, motivo, stock_anterior, stock_resultante)
 select id_producto, :'emp_id', 'SALIDA', 2, 'Venta', 10, 8 from public.producto where codigo = 'COCA500';
 delete from public.producto where codigo = 'COCA500';
 rollback;
 
-\echo '=== P. Borrar un producto SIN movimientos --> esperado: se borra (DELETE 1)'
+\echo '=== P. Borrar un producto SIN movimientos --> esperado: se borra (DELETE 1) (desde borrado_logico_productos: DELETE 0, queda marcado como eliminado)'
 begin;
 delete from public.producto where codigo = 'YERBA1K';
 rollback;
