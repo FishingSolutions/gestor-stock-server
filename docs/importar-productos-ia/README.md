@@ -72,7 +72,7 @@ npx supabase migration up
 
 La migración es **aditiva**:
 
-* agrega columnas al historial (`idempotency_key`, `hash_archivo`, `modo_stock`, contadores, `ia_*`);
+* agrega columnas al historial (`idempotency_key`, `hash_archivo`, `hash_operacion`, `modo_stock`, contadores, `ia_*`);
 * crea `importacion_producto_fila` (detalle por fila, RLS solo admin);
 * crea `confirmar_importacion_productos(...)`.
 
@@ -90,13 +90,13 @@ No hace falta `--no-verify-jwt`: la función valida la sesión y además el rol 
 | Variable | Obligatoria | Por defecto | Para qué |
 |---|---|---|---|
 | `AI_API_KEY` | no | — | Clave del proveedor. Sin ella, el importador funciona con alias y avisa `IA_NO_CONFIGURADA`. |
-| `AI_BASE_URL` | no | `https://generativelanguage.googleapis.com/v1beta/openai` | Endpoint compatible con OpenAI. |
-| `AI_MODEL` | no | `gemini-3.5-flash-lite` | Modelo a usar. |
+| `AI_BASE_URL` | sí, junto con la clave | — | Endpoint HTTPS compatible con OpenAI, elegido según el proveedor. |
+| `AI_MODEL` | sí, junto con la clave | — | Identificador del modelo habilitado en la cuenta/proveedor. No hay modelo predeterminado. |
 | `AI_TIMEOUT_MS` | no | `15000` | Corte de la llamada. |
 | `AI_MAX_SAMPLE_ROWS` | no | `10` | Filas de muestra que se mandan (máximo 10). |
 | `AI_DAILY_LIMIT` | no | `20` | Tope diario de importaciones con IA por proyecto. |
 
-Configuración con Google Gemini (free tier):
+Ejemplo de configuración con un endpoint de Google Gemini compatible con OpenAI (confirmá en AI Studio que el modelo indicado esté habilitado en tu cuenta):
 
 1. Crear una clave en [Google AI Studio](https://aistudio.google.com/apikey).
 2. Guardar los secretos:
@@ -105,12 +105,11 @@ Configuración con Google Gemini (free tier):
 npx supabase secrets set \
   AI_API_KEY=tu_clave \
   AI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai \
-  AI_MODEL=gemini-3.5-flash-lite
+  AI_MODEL=MODELO_DISPONIBLE_EN_TU_CUENTA
 ```
 
-> **Modelo:** `gemini-2.5-flash` se retira para proyectos nuevos; desde el 2026-12-01 las
-> llamadas a ese modelo se redirigen a `gemini-3.5-flash-lite`. El valor por defecto ya apunta al
-> modelo vigente. Si Google cambia el nombre, alcanza con actualizar `AI_MODEL`.
+Si falta la clave, el endpoint o el modelo, la función no llama a un proveedor y usa el mapeo
+determinista. El mismo fallback aplica si hay timeout, error HTTP o respuesta inválida.
 
 Para probar en local, crear `supabase/functions/.env` con las mismas variables.
 
@@ -260,8 +259,10 @@ También se rechazan archivos vacíos, corruptos, con contraseña o con más fil
 ### IA: qué se manda y qué no
 
 * Se hace **una sola llamada por archivo**, no una por fila.
-* A la IA se le mandan **solo los encabezados y hasta 10 filas de muestra**.
-* Números y fechas se enmascaran (`<numero>`, `<fecha>`): el modelo no ve precios ni stock reales.
+* Los encabezados y hasta 10 filas de muestra se usan para inferir tipos de columna.
+* De las filas no salen valores comerciales: números, fechas, booleanos y textos se reemplazan por
+  `<numero>`, `<fecha>`, `<booleano>` y `<texto>`. Los únicos valores reales enviados son los
+  nombres de encabezado.
 * Las celdas se declaran explícitamente como **datos, no instrucciones** (defensa ante *prompt
   injection*).
 * Todo lo que devuelve el modelo se valida: campo existente, índice en rango y columna no repetida.
@@ -272,9 +273,12 @@ También se rechazan archivos vacíos, corruptos, con contraseña o con más fil
 ### Idempotencia y atomicidad
 
 * El cliente genera una **clave única** al empezar y la manda al confirmar.
-* Reintentar con la misma clave, el mismo archivo y el mismo modo devuelve el resultado anterior
+* PostgreSQL calcula una huella SHA-256 determinista de la operación final: contenido del archivo,
+  hoja, mapeo, decisiones, modo, creación de categorías y filas/valores definitivos.
+* Reintentar una operación equivalente con la misma clave devuelve el resultado anterior
   (`repetida: true`) sin duplicar productos ni movimientos.
-* Reutilizar la clave con otro archivo u otro modo devuelve `409 IDEMPOTENCIA_CONFLICTO`.
+* Reutilizar la clave cambiando cualquier parte de la operación devuelve
+  `409 IDEMPOTENCIA_CONFLICTO`.
 * Si el lote se rechaza, la clave **no se consume**: se puede corregir y reintentar.
 * Toda la aplicación del lote ocurre en una transacción: si una fila falla, no se aplica ninguna.
 
@@ -297,7 +301,7 @@ También se rechazan archivos vacíos, corruptos, con contraseña o con más fil
 ### Unitarias (sin base ni red)
 
 ```bash
-cd gestor-stock-server && npm test     # 36 pruebas: texto, mapeo, filas, coincidencias, IA
+cd gestor-stock-server && npm test     # 37 pruebas: texto, mapeo, filas, coincidencias, IA
 cd gestor-stock-client && npm test     # 20 pruebas: xlsx, exportación, estados y resumen
 cd gestor-stock-client && npm run lint
 cd gestor-stock-client && npm run build

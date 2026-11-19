@@ -144,10 +144,13 @@ export function leerLibro(
   }
 
   const filaCruda = crudas[indiceEncabezado] ?? []
-  const cantidadColumnas = Math.min(
-    Math.max(filaCruda.length, ...crudas.slice(0, 50).map((f) => (f ?? []).length)),
-    LIMITES.maxColumnas,
-  )
+  const cantidadColumnas = Math.max(...crudas.map((fila) => (fila ?? []).length))
+  if (cantidadColumnas > LIMITES.maxColumnas) {
+    throw new ErrorArchivo(
+      'DEMASIADAS_COLUMNAS',
+      `La planilla supera el máximo de ${LIMITES.maxColumnas} columnas.`,
+    )
+  }
 
   const encabezados: string[] = []
   for (let c = 0; c < cantidadColumnas; c++) {

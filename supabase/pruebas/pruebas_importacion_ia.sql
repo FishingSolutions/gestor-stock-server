@@ -132,6 +132,46 @@ select count(*) as productos_idem from public.producto where codigo = 'IDEM1';
 rollback;
 
 \echo ''
+\echo '=== 8b. Misma clave, contenido final distinto: conflicto'
+begin; :como_admin
+select public.confirmar_importacion_productos(
+  'aaaaaaaa-0000-0000-0000-000000000008', 'idem.xlsx', null, null, 'SUMAR',
+  $f$[{"fila":2,"codigo":"IDEM1","nombre":"Producto idempotente","precio":10,"stock":2}]$f$::jsonb,
+  false, $d${"hashArchivo":"hash-1"}$d$::jsonb
+);
+do $$
+begin
+  begin
+    perform public.confirmar_importacion_productos(
+      'aaaaaaaa-0000-0000-0000-000000000008', 'idem.xlsx', 'OtraHoja', null, 'SUMAR',
+      '[{"fila":2,"codigo":"IDEM1","nombre":"Producto idempotente","precio":10,"stock":2}]'::jsonb,
+      false, '{"hashArchivo":"hash-1","mapeo":{"codigo":3},"decisiones":{"2":{"accion":"CREAR"}}}'::jsonb
+    );
+    raise exception 'PRUEBA_FALLO: se aceptó una operación distinta con la misma clave';
+  exception when others then
+    if sqlerrm not like 'IDEMPOTENCIA_CONFLICTO:%' then
+      raise;
+    end if;
+    raise notice 'OK: hoja, mapeo y decisiones distintos producen conflicto';
+  end;
+  begin
+    perform public.confirmar_importacion_productos(
+      'aaaaaaaa-0000-0000-0000-000000000008', 'idem.xlsx', null, null, 'SUMAR',
+      '[{"fila":2,"codigo":"IDEM1","nombre":"Producto idempotente","precio":11,"stock":2}]'::jsonb,
+      false, '{"hashArchivo":"hash-1"}'::jsonb
+    );
+    raise exception 'PRUEBA_FALLO: se aceptaron datos finales distintos con la misma clave';
+  exception when others then
+    if sqlerrm not like 'IDEMPOTENCIA_CONFLICTO:%' then
+      raise;
+    end if;
+    raise notice 'OK: valores finales distintos producen conflicto';
+  end;
+  end;
+end;
+rollback;
+
+\echo ''
 \echo '=== 9. Idempotencia: la misma clave con otro archivo es un conflicto'
 begin; :como_admin
 select public.confirmar_importacion_productos(

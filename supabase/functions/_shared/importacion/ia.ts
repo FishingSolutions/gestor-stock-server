@@ -1,9 +1,8 @@
 // =====================================================================
 // Llamada a la IA para mapear columnas.
 //
-// Se usa un proveedor compatible con OpenAI (por defecto Google Gemini)
-// y se hace UNA sola llamada por archivo: encabezados + hasta 10 filas de
-// muestra. Nunca se manda el inventario completo ni la base de datos.
+// Se usa un proveedor compatible con OpenAI configurado por entorno y se
+// hace UNA sola llamada por archivo. Nunca se manda el inventario completo.
 //
 // Los números de las muestras se enmascaran ("<numero>"), así el modelo
 // puede inferir el tipo de columna sin ver precios ni stock reales.
@@ -13,11 +12,8 @@
 // =====================================================================
 import { normalizarTexto } from './texto.ts'
 
-const BASE_POR_DEFECTO = 'https://generativelanguage.googleapis.com/v1beta/openai'
-const MODELO_POR_DEFECTO = 'gemini-3.5-flash-lite'
 const TIMEOUT_POR_DEFECTO = 15000
 const MAX_MUESTRAS = 10
-const MAX_LARGO_TEXTO = 40
 
 const CAMPOS_VALIDOS = [
   'codigo', 'nombre', 'descripcion', 'categoria', 'stock',
@@ -40,12 +36,12 @@ const SIN_USO = (motivo: string): ResultadoIA => ({
   sugerencias: null,
 })
 
-/** Enmascara un valor para que no salga información comercial del sistema. */
+/** Envía solo el tipo de celda, nunca códigos, nombres ni datos comerciales. */
 export function enmascarar(valor: unknown): string | null {
   const texto = normalizarTexto(valor)
   if (texto === null) return null
 
-  // Números y fechas: solo se informa el tipo
+  // Los valores numéricos y las fechas se reducen a su tipo.
   if (typeof valor === 'number') return '<numero>'
   if (valor instanceof Date) return '<fecha>'
 
@@ -57,8 +53,8 @@ export function enmascarar(valor: unknown): string | null {
 
   if (/^[+-]?\d+([.,]\d+)*$/.test(sinMoneda)) return '<numero>'
   if (/^\d{1,4}[-/]\d{1,2}[-/]\d{1,4}$/.test(sinMoneda)) return '<fecha>'
-
-  return texto.length > MAX_LARGO_TEXTO ? `${texto.slice(0, MAX_LARGO_TEXTO)}…` : texto
+  if (/^(si|sí|no|true|false|activo|inactivo)$/i.test(texto)) return '<booleano>'
+  return '<texto>'
 }
 
 function construirMensajes(encabezados: string[], muestras: unknown[][]) {
@@ -110,6 +106,22 @@ function extraerJson(texto: string): unknown {
   }
 }
 
+/** No elige proveedor/modelo por el usuario: exige una configuración explícita. */
+export function validarConfiguracionProveedor(
+  apiKey: string | null,
+  base: string | null,
+  modelo: string | null,
+): { apiKey: string; url: URL; modelo: string } | null {
+  if (!apiKey?.trim() || !base?.trim() || !modelo?.trim()) return null
+  try {
+    const url = new URL(`${base.trim().replace(/\/+$/, '')}/chat/completions`)
+    if (url.protocol !== 'https:' || url.username || url.password) return null
+    return { apiKey: apiKey.trim(), url, modelo: modelo.trim() }
+  } catch {
+    return null
+  }
+}
+
 /**
  * Pide a la IA que proponga el mapeo de columnas.
  * Nunca lanza: cualquier problema se devuelve como `usada: false`.
@@ -121,8 +133,11 @@ export async function sugerirMapeo(
   const apiKey = Deno.env.get('AI_API_KEY')?.trim()
   if (!apiKey) return SIN_USO('IA_NO_CONFIGURADA')
 
-  const base = (Deno.env.get('AI_BASE_URL')?.trim() || BASE_POR_DEFECTO).replace(/\/+$/, '')
-  const modelo = Deno.env.get('AI_MODEL')?.trim() || MODELO_POR_DEFECTO
+  const baseConfigurada = Deno.env.get('AI_BASE_URL')?.trim()
+  const modelo = Deno.env.get('AI_MODEL')?.trim()
+  const configuracion = validarConfiguracionProveedor(apiKey, baseConfigurada, modelo)
+  if (!configuracion) return SIN_USO('IA_CONFIGURACION_INCOMPLETA')
+
   const timeout = Number(Deno.env.get('AI_TIMEOUT_MS')) || TIMEOUT_POR_DEFECTO
   const maxMuestras = Number(Deno.env.get('AI_MAX_SAMPLE_ROWS')) || MAX_MUESTRAS
 
@@ -132,15 +147,15 @@ export async function sugerirMapeo(
   const temporizador = setTimeout(() => control.abort(), timeout)
 
   try {
-    const respuesta = await fetch(`${base}/chat/completions`, {
+    const respuesta = await fetch(configuracion.url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${configuracion.apiKey}`,
       },
       signal: control.signal,
       body: JSON.stringify({
-        model: modelo,
+        model: configuracion.modelo,
         temperature: 0,
         max_tokens: 400,
         messages: construirMensajes(encabezados, muestras),
@@ -150,30 +165,30 @@ export async function sugerirMapeo(
     const ms = Date.now() - inicio
 
     if (respuesta.status === 429) {
-      return { usada: false, modelo, ms, motivo: 'IA_SIN_CUOTA', sugerencias: null }
+      return { usada: false, modelo: configuracion.modelo, ms, motivo: 'IA_SIN_CUOTA', sugerencias: null }
     }
     if (!respuesta.ok) {
-      return { usada: false, modelo, ms, motivo: `IA_ERROR_HTTP_${respuesta.status}`, sugerencias: null }
+      return { usada: false, modelo: configuracion.modelo, ms, motivo: `IA_ERROR_HTTP_${respuesta.status}`, sugerencias: null }
     }
 
     const cuerpo = await respuesta.json()
     const contenido = cuerpo?.choices?.[0]?.message?.content
     if (typeof contenido !== 'string' || !contenido.trim()) {
-      return { usada: false, modelo, ms, motivo: 'IA_RESPUESTA_VACIA', sugerencias: null }
+      return { usada: false, modelo: configuracion.modelo, ms, motivo: 'IA_RESPUESTA_VACIA', sugerencias: null }
     }
 
     const json = extraerJson(contenido)
     if (!json) {
-      return { usada: false, modelo, ms, motivo: 'IA_RESPUESTA_INVALIDA', sugerencias: null }
+      return { usada: false, modelo: configuracion.modelo, ms, motivo: 'IA_RESPUESTA_INVALIDA', sugerencias: null }
     }
 
-    return { usada: true, modelo, ms, motivo: null, sugerencias: json }
+    return { usada: true, modelo: configuracion.modelo, ms, motivo: null, sugerencias: json }
   } catch (error) {
     const ms = Date.now() - inicio
     const abortado = error instanceof Error && error.name === 'AbortError'
     return {
       usada: false,
-      modelo,
+      modelo: configuracion.modelo,
       ms,
       motivo: abortado ? 'IA_TIMEOUT' : 'IA_NO_DISPONIBLE',
       sugerencias: null,

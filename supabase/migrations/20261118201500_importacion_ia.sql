@@ -34,6 +34,7 @@
 alter table public.importacion_producto
   add column if not exists idempotency_key        uuid,
   add column if not exists hash_archivo           text,
+  add column if not exists hash_operacion         text,
   add column if not exists modo_stock             text,
   add column if not exists productos_actualizados integer not null default 0,
   add column if not exists productos_sin_cambios  integer not null default 0,
@@ -102,6 +103,9 @@ comment on table public.importacion_producto_fila is
 -- Recibe SOLO filas ya validadas y clasificadas por la Edge Function, pero
 -- vuelve a verificar todo: códigos, precios, stock, categorías y que el
 -- producto elegido para una fila sea realmente el del código.
+-- `UPSERT` representa la intención estable de crear/actualizar por código:
+-- evita que un reintento cambie de huella después de que el primer intento
+-- creó el producto y la vista previa ahora lo clasifica como existente.
 --
 -- Si una sola fila tiene error, no se aplica NADA y queda un historial
 -- RECHAZADA (sin clave de idempotencia, para poder corregir y reintentar).
@@ -126,9 +130,12 @@ declare
   v_usuario        uuid := (select auth.uid());
   v_modo           text := nullif(upper(btrim(coalesce(p_modo_stock, ''))), '');
   v_hash           text := nullif(btrim(coalesce(p_detalle ->> 'hashArchivo', '')), '');
+  v_hash_operacion text;
   v_previa         public.importacion_producto%rowtype;
   v_producto       public.producto%rowtype;
   v_fila           record;
+  v_codigo         text;
+  v_categoria      text;
   v_ctids          tid[];
   v_ct             tid;
   v_id             bigint;
@@ -176,6 +183,30 @@ begin
     raise exception 'Se pueden importar como máximo 2000 filas por vez';
   end if;
 
+  -- La huella se calcula en la base sobre las operaciones definitivas,
+  -- no sobre una huella declarada por el cliente. jsonb canonicaliza el
+  -- orden de las claves; el orden de las filas se conserva.
+  v_hash_operacion := encode(
+    extensions.digest(
+      convert_to(
+        jsonb_build_object(
+          'version', 1,
+          'hashArchivo', p_detalle -> 'hashArchivo',
+          'archivo', p_archivo,
+          'hoja', p_hoja,
+          'mapeo', p_detalle -> 'mapeo',
+          'decisiones', p_detalle -> 'decisiones',
+          'modoStock', v_modo,
+          'crearCategorias', coalesce(p_crear_categorias, false),
+          'filas', p_filas
+        )::text,
+        'UTF8'
+      ),
+      'sha256'
+    ),
+    'hex'
+  );
+
   -- 2. Idempotencia ------------------------------------------------------
   -- El lock hace que dos confirmaciones simultáneas con la misma clave se
   -- esperen en vez de intentar escribir las dos.
@@ -186,10 +217,9 @@ begin
   where idempotency_key = p_idempotency_key;
 
   if found then
-    -- Mismo archivo y mismo modo: se devuelve el resultado anterior y no se
+    -- Misma operación completa: se devuelve el resultado anterior y no se
     -- duplica ni un producto ni un movimiento.
-    if v_previa.hash_archivo is not distinct from v_hash
-       and v_previa.modo_stock is not distinct from v_modo then
+    if v_previa.hash_operacion is not distinct from v_hash_operacion then
       -- Se devuelve el resultado guardado, marcado como repetido para que
       -- el front no lo muestre como una importación nueva.
       return coalesce(
@@ -201,7 +231,7 @@ begin
       ) || jsonb_build_object('repetida', true);
     end if;
 
-    raise exception 'IDEMPOTENCIA_CONFLICTO: esta importación ya se confirmó con otro archivo o con otro modo de stock';
+    raise exception 'IDEMPOTENCIA_CONFLICTO: la clave ya se confirmó con una operación distinta';
   end if;
 
   -- 3. Filas recibidas, con el texto limpio ------------------------------
@@ -231,13 +261,33 @@ begin
          stock numeric, precio numeric, costo numeric, "stockMinimo" numeric,
          "stockMaximo" numeric, activo boolean, accion text, "idProducto" bigint);
 
+  -- Serializa los códigos normalizados para que dos importaciones distintas
+  -- no puedan crear variantes del mismo código al mismo tiempo.
+  for v_codigo in
+    select distinct lower(btrim(codigo))
+    from pg_temp.imp_filas
+    where codigo is not null
+    order by 1
+  loop
+    perform pg_advisory_xact_lock(hashtext('producto:' || v_codigo));
+  end loop;
+
+  for v_categoria in
+    select distinct lower(btrim(categoria))
+    from pg_temp.imp_filas
+    where categoria is not null
+    order by 1
+  loop
+    perform pg_advisory_xact_lock(hashtext('categoria:' || v_categoria));
+  end loop;
+
   -- 4. Reglas de cada fila (gana la primera que falla).
   --    Las filas EXCLUIR no se validan: el administrador ya decidió no
   --    importarlas y muchas veces se excluyen justamente porque están mal.
   update pg_temp.imp_filas e
   set error = (
     select v.error from (values
-      (case when e.accion not in ('CREAR', 'ACTUALIZAR', 'EXCLUIR')
+      (case when e.accion not in ('CREAR', 'ACTUALIZAR', 'UPSERT', 'EXCLUIR')
             then 'Acción inválida para la fila.' end),
       (case when e.codigo is null then 'El código es obligatorio.'
             when e.codigo ~ '[[:cntrl:]]' then 'El código tiene caracteres no permitidos.'
@@ -290,6 +340,11 @@ begin
         where q.id_producto <> p.id_producto
           and lower(btrim(q.codigo)) = lower(e.codigo)
       )
+      and p.id_producto = coalesce(
+        nullif(p_detalle -> 'decisiones' -> e.fila::text ->> 'idProducto', '')::bigint,
+        -1
+      )
+      and p_detalle -> 'decisiones' -> e.fila::text ->> 'accion' = 'VINCULAR'
     );
 
   -- 5.2 Si se pidió un producto que no sirve, es un error: nunca se toca
@@ -331,7 +386,8 @@ begin
     e.codigo
   )
   where e.error is null
-    and e.accion = 'CREAR'
+    and e.accion in ('CREAR', 'UPSERT')
+    and e.id_producto is null
     and exists (
       select 1
       from public.producto p
@@ -345,6 +401,32 @@ begin
     e.codigo
   )
   where e.error is null and e.accion = 'ACTUALIZAR' and e.id_producto is null;
+
+  update pg_temp.imp_filas e
+  set error = 'El precio es obligatorio para crear un producto nuevo.'
+  where e.error is null
+    and e.accion = 'UPSERT'
+    and e.id_producto is null
+    and e.precio is null;
+
+  -- Una fila del archivo no puede actualizar el mismo producto que otra.
+  with destinos_repetidos as (
+    select
+      ctid,
+      row_number() over w as n,
+      first_value(fila) over w as fila_original
+    from pg_temp.imp_filas
+    where error is null
+      and accion <> 'EXCLUIR'
+      and id_producto is not null
+    window w as (partition by id_producto order by fila, ctid)
+  )
+  update pg_temp.imp_filas e
+  set error = format('El producto seleccionado ya aparece en otra fila (fila %s).', r.fila_original)
+  from destinos_repetidos r
+  where e.ctid = r.ctid
+    and r.n > 1
+    and e.error is null;
 
   -- 6. Códigos repetidos dentro del archivo (vale la primera aparición) ----
   with orden as (
@@ -467,7 +549,8 @@ begin
       end if;
 
       -- 9.1 Producto nuevo: entra en 0 y el stock inicial queda como ENTRADA
-      if v_fila.accion = 'CREAR' then
+      if v_fila.accion = 'CREAR'
+         or (v_fila.accion = 'UPSERT' and v_fila.id_producto is null) then
         v_id_categoria := null;
         if v_fila.categoria is not null then
           select c.id_categoria into v_id_categoria
@@ -672,6 +755,7 @@ begin
   set estado = 'COMPLETADA',
       idempotency_key = p_idempotency_key,
       hash_archivo = v_hash,
+      hash_operacion = v_hash_operacion,
       productos_importados = v_creados,
       productos_actualizados = v_actualizados,
       productos_sin_cambios = v_sin_cambios,

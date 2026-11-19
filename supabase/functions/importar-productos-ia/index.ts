@@ -335,7 +335,7 @@ async function confirmar(formulario: FormData, supabase: SupabaseClient) {
   const clave = texto(formulario.get('idempotencyKey'))
   const crearCategorias = texto(formulario.get('crearCategorias')) === 'true'
   const mapeoPedido = leerJson<Mapeo | null>(formulario.get('mapeo'), null)
-  const decisiones = leerJson<Record<string, Decision>>(formulario.get('decisiones'), {})
+  const decisionesCrudas = leerJson<unknown>(formulario.get('decisiones'), {})
   const ia = leerJson<{ usada?: boolean; modelo?: string | null; ms?: number }>(
     formulario.get('ia'),
     { usada: false, modelo: null, ms: 0 },
@@ -370,6 +370,7 @@ async function confirmar(formulario: FormData, supabase: SupabaseClient) {
   }
 
   const filas = construirFilas(lectura, base)
+  const decisiones = validarDecisiones(decisionesCrudas, filas)
   const productos = await cargarProductos(supabase)
   const previa = clasificarFilas(filas, productos, modo)
 
@@ -378,6 +379,13 @@ async function confirmar(formulario: FormData, supabase: SupabaseClient) {
 
   for (const fila of previa) {
     const decision = decisiones[String(fila.fila)] ?? null
+    if (decision && decision.accion !== 'EXCLUIR' && fila.estado !== 'ambigua') {
+      throw new ErrorHttp(
+        400,
+        'DECISION_NO_APLICABLE',
+        `La fila ${fila.fila} no requiere resolver una coincidencia ambigua.`,
+      )
+    }
 
     // Excluida a mano: se manda igual para que quede en el historial.
     if (decision?.accion === 'EXCLUIR') {
@@ -429,12 +437,14 @@ async function confirmar(formulario: FormData, supabase: SupabaseClient) {
     }
 
     if (fila.estado === 'nuevo') {
-      pagos.push(aPago(fila, 'CREAR', null))
+      pagos.push(aPago(fila, 'UPSERT', null))
       continue
     }
 
     // existente o sin_cambios
-    pagos.push(aPago(fila, 'ACTUALIZAR', fila.idProducto))
+    // La intención por código permanece estable entre el primer intento y
+    // un reintento posterior a la confirmación (cuando ya existe el producto).
+    pagos.push(aPago(fila, 'UPSERT', null))
   }
 
   if (errores.length > 0) {
@@ -462,6 +472,7 @@ async function confirmar(formulario: FormData, supabase: SupabaseClient) {
       mapeo: base,
       filaEncabezado: lectura.filaEncabezado,
       columnasIgnoradas: columnasSinMapear(lectura.encabezados, base),
+      decisiones,
     },
     p_ia: { usada: ia.usada === true, modelo: ia.modelo ?? null, ms: Number(ia.ms) || 0 },
   })
@@ -471,7 +482,7 @@ async function confirmar(formulario: FormData, supabase: SupabaseClient) {
       throw new ErrorHttp(
         409,
         'IDEMPOTENCIA_CONFLICTO',
-        'Esta importación ya se confirmó con otro archivo o con otro modo de stock. Volvé a analizar el archivo.',
+        'Esta clave ya se usó para una operación distinta. Iniciá una nueva importación para aplicar otros cambios.',
       )
     }
     if (/administrador/i.test(error.message ?? '')) {
@@ -538,6 +549,51 @@ function aPago(fila: ReturnType<typeof clasificarFilas>[number], accion: string,
     accion,
     idProducto,
   }
+}
+
+function validarDecisiones(
+  valor: unknown,
+  filas: ReturnType<typeof construirFilas>,
+): Record<string, Decision> {
+  if (!valor || typeof valor !== 'object' || Array.isArray(valor)) {
+    throw new ErrorHttp(400, 'DECISIONES_INVALIDAS', 'Las decisiones de filas no tienen un formato válido.')
+  }
+
+  const existentes = new Map(filas.map((fila) => [String(fila.fila), fila]))
+  const resultado: Record<string, Decision> = {}
+
+  for (const [numero, decision] of Object.entries(valor)) {
+    if (!/^[1-9]\d*$/.test(numero) || !existentes.has(numero)) {
+      throw new ErrorHttp(400, 'DECISION_FILA_INVALIDA', `La fila "${numero}" no pertenece al archivo.`)
+    }
+    if (!decision || typeof decision !== 'object' || Array.isArray(decision)) {
+      throw new ErrorHttp(400, 'DECISION_INVALIDA', `La decisión de la fila ${numero} no es válida.`)
+    }
+
+    const objeto = decision as Record<string, unknown>
+    if (Object.keys(objeto).some((campo) => !['accion', 'idProducto'].includes(campo))) {
+      throw new ErrorHttp(400, 'DECISION_INVALIDA', `La decisión de la fila ${numero} contiene campos no permitidos.`)
+    }
+
+    const accion = objeto.accion
+    if (accion !== 'VINCULAR' && accion !== 'CREAR' && accion !== 'EXCLUIR') {
+      throw new ErrorHttp(400, 'DECISION_INVALIDA', `La acción de la fila ${numero} no es válida.`)
+    }
+
+    if (accion === 'VINCULAR') {
+      if (!Number.isSafeInteger(objeto.idProducto) || Number(objeto.idProducto) <= 0) {
+        throw new ErrorHttp(400, 'PRODUCTO_INVALIDO', `El producto elegido para la fila ${numero} no es válido.`)
+      }
+      resultado[numero] = { accion, idProducto: Number(objeto.idProducto) }
+    } else {
+      if (objeto.idProducto !== undefined) {
+        throw new ErrorHttp(400, 'DECISION_INVALIDA', `La decisión de la fila ${numero} no debe incluir un producto.`)
+      }
+      resultado[numero] = { accion: accion as Decision['accion'] }
+    }
+  }
+
+  return resultado
 }
 
 // ---------------------------------------------------------------------

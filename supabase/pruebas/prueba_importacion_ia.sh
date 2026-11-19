@@ -21,8 +21,7 @@ fi
 
 OK=0; FALLO=0
 TMP=$(mktemp)
-DIR=supabase/pruebas/.planillas_ia_tmp
-mkdir -p "$DIR"
+DIR=$(mktemp -d supabase/pruebas/.planillas_ia_tmp.XXXXXX)
 trap 'rm -rf "$DIR" "$TMP"' EXIT
 
 check() {
@@ -68,6 +67,8 @@ K8=aaaaaaaa-1111-4111-8111-000000000008
 K9=aaaaaaaa-1111-4111-8111-000000000009
 K10=aaaaaaaa-1111-4111-8111-000000000010
 K11=aaaaaaaa-1111-4111-8111-000000000011
+K12=aaaaaaaa-1111-4111-8111-000000000012
+K13=aaaaaaaa-1111-4111-8111-000000000013
 
 ADMIN=$(token admin@stockfx.com); EMP=$(token empleado@stockfx.com)
 [ ${#ADMIN} -gt 20 ] && [ ${#EMP} -gt 20 ] || { echo "No se pudo iniciar sesión con los usuarios de demo"; exit 1; }
@@ -114,6 +115,7 @@ guardar('categoria.xlsx', [T, ['CAT-NEW', 'Producto categoría nueva', 'Categor�
 guardar('duplicado.xlsx', [T, ['DUP1', 'Duplicado uno', '', 1, 10, 5], ['DUP1', 'Duplicado dos', '', 2, 20, 10]])
 guardar('formula.xlsx', [T, ['=SUM(A1:A2)', 'Código fórmula', '', 1, 10, 5], ['F-OK', 'Producto sano', '', 1, 10, 5]])
 guardar('ceros.xlsx', [T, ['0001', 'Código con ceros', '', 1, 10, 5]])
+guardar('concurrente.xlsx', [T, ['CONCURRENT1', 'Producto concurrente', '', 3, 15, 8]])
 guardar('sin-precio.xlsx', [['Codigo', 'Descripcion', 'Stock'], ['X1', 'Sin precio', 5]])
 guardar('sin-codigo.xlsx', [['SKU interno', 'Nombre comercial', 'Precio'], ['M-1', 'Producto mapeado', 100]])
 
@@ -121,6 +123,14 @@ guardar('sin-codigo.xlsx', [['SKU interno', 'Nombre comercial', 'Precio'], ['M-1
 const muchas = [T]
 for (let i = 1; i <= 2001; i++) muchas.push([`T${i}`, `Producto ${i}`, '', 1, 10, 5])
 guardar('demasiadas.xlsx', muchas)
+
+const encabezadosAnchos = Array.from({ length: 61 }, (_, i) => `Columna ${i + 1}`)
+encabezadosAnchos[0] = 'Codigo'
+encabezadosAnchos[1] = 'Descripcion'
+const filaAncha = Array(61).fill('')
+filaAncha[0] = 'ANCHO1'
+filaAncha[1] = 'Producto ancho'
+guardar('demasiadas-columnas.xlsx', [encabezadosAnchos, filaAncha])
 
 writeFileSync(`${dir}/no-es-excel.xlsx`, 'Codigo,Descripcion,Stock,Precio\nZ1,Trucho,1,1\n')
 writeFileSync(`${dir}/datos.csv`, 'Codigo,Descripcion,Stock,Precio\nZ1,Trucho,1,1\n')
@@ -154,6 +164,7 @@ check "Archivo .csv"                                "$(analizar "$ADMIN" "$DIR/d
 check "Sin archivo"                                 "$(post "$ADMIN" -F 'accion=analizar' -F 'otro=1')/$(cuerpo error.codigo)" "400/SIN_ARCHIVO"
 check "Hoja inexistente"                            "$(analizar "$ADMIN" "$DIR/basico.xlsx" -F 'hoja=NoExiste')/$(cuerpo error.codigo)" "400/HOJA_INEXISTENTE"
 check "Más de 2.000 filas"                          "$(analizar "$ADMIN" "$DIR/demasiadas.xlsx")/$(cuerpo error.codigo)" "400/DEMASIADAS_FILAS"
+check "Más de 60 columnas"                          "$(analizar "$ADMIN" "$DIR/demasiadas-columnas.xlsx")/$(cuerpo error.codigo)" "400/DEMASIADAS_COLUMNAS"
 check "Columnas no reconocidas: pide mapeo"         "$(analizar "$ADMIN" "$DIR/sin-codigo.xlsx")/$(cuerpo necesitaMapeo)" "200/true"
 check "  con mapeo manual funciona"                 "$(analizar "$ADMIN" "$DIR/sin-codigo.xlsx" -F 'mapeo={"codigo":0,"nombre":1,"precio":2}')/$(cuerpo filas.0.estado)" "200/nuevo"
 
@@ -171,6 +182,34 @@ check "Repetir la confirmación (misma clave)"       "$(confirmar "$ADMIN" "$DIR
 rest "$ADMIN" "producto?codigo=eq.NUEVO01&select=stock_actual" >/dev/null
 check "  no se duplicó el stock"                    "$(cuerpo 0.stock_actual)" "7"
 check "Misma clave con otro modo es conflicto"      "$(confirmar "$ADMIN" "$DIR/basico.xlsx" "$K1" SUMAR '{}')/$(cuerpo error.codigo)" "409/IDEMPOTENCIA_CONFLICTO"
+
+echo; echo "=============== REINTENTOS SIMULTÁNEOS ==============="
+curl -s -o "$DIR/concurrente-1.json" -w '%{http_code}' -X POST "$FN" \
+  -H "apikey: $ANON_KEY" -H "Authorization: Bearer $ADMIN" \
+  -F "accion=confirmar" -F "archivo=@$DIR/concurrente.xlsx" \
+  -F "idempotencyKey=$K12" -F 'modoStock=REEMPLAZAR' -F 'decisiones={}' \
+  -F 'crearCategorias=false' > "$DIR/concurrente-1.status" &
+PID1=$!
+curl -s -o "$DIR/concurrente-2.json" -w '%{http_code}' -X POST "$FN" \
+  -H "apikey: $ANON_KEY" -H "Authorization: Bearer $ADMIN" \
+  -F "accion=confirmar" -F "archivo=@$DIR/concurrente.xlsx" \
+  -F "idempotencyKey=$K12" -F 'modoStock=REEMPLAZAR' -F 'decisiones={}' \
+  -F 'crearCategorias=false' > "$DIR/concurrente-2.status" &
+PID2=$!
+wait "$PID1"; wait "$PID2"
+check "Dos confirmaciones simultáneas con la misma clave" \
+  "$(cat "$DIR/concurrente-1.status")/$(cat "$DIR/concurrente-2.status")" "200/200"
+R1=$(campo repetida < "$DIR/concurrente-1.json")
+R2=$(campo repetida < "$DIR/concurrente-2.json")
+check "  una aplica y la otra devuelve el resultado anterior" \
+  "$(printf '%s\n%s\n' "$R1" "$R2" | sort | tr '\n' '/')" "false/true/"
+rest "$ADMIN" "producto?codigo=eq.CONCURRENT1&select=id_producto,stock_actual" >/dev/null
+CONCURRENT_ID=$(cuerpo 0.id_producto)
+check "  se creó un único producto con stock 3" \
+  "$(cuerpo length)/$(cuerpo 0.stock_actual)" "1/3"
+mov "$CONCURRENT_ID"
+check "  se registró un único movimiento de entrada" \
+  "$(cuerpo 0.tipo_movimiento)/$(cuerpo 0.cantidad)" "ENTRADA/3"
 
 echo; echo "=============== STOCK: SUMAR Y REEMPLAZAR ==============="
 check "SUMAR stock (NUEVO01 7->12, AGUA2L 6->10)"   "$(confirmar "$ADMIN" "$DIR/sumar.xlsx" "$K2" SUMAR '{}')/$(cuerpo estado)" "200/COMPLETADA"
@@ -200,6 +239,8 @@ check "  se actualizó COCA500 y no se creó otro"    "$(cuerpo 0.codigo)/$(cuer
 rest "$ADMIN" "producto?codigo=eq.NUEVO-COCA&select=id_producto" >/dev/null
 check "  el código nuevo no existe"                 "$(cuerpo length)" "0"
 check "VINCULAR a un producto que no corresponde"   "$(confirmar "$ADMIN" "$DIR/ambigua.xlsx" "$K5" REEMPLAZAR "{\"2\":{\"accion\":\"VINCULAR\",\"idProducto\":$AGUA_ID}}")/$(cuerpo error.codigo)" "422/FILAS_SIN_RESOLVER"
+check "Decisión para una fila inexistente"           "$(confirmar "$ADMIN" "$DIR/ambigua.xlsx" "$K13" REEMPLAZAR '{"999":{"accion":"EXCLUIR"}}')/$(cuerpo error.codigo)" "400/DECISION_FILA_INVALIDA"
+check "ID de producto fuera del rango seguro"        "$(confirmar "$ADMIN" "$DIR/ambigua.xlsx" "$K13" REEMPLAZAR '{"2":{"accion":"VINCULAR","idProducto":9007199254740992}}')/$(cuerpo error.codigo)" "400/PRODUCTO_INVALIDO"
 check "CREAR a pesar del nombre parecido"           "$(confirmar "$ADMIN" "$DIR/ambigua-crear.xlsx" "$K6" REEMPLAZAR '{"2":{"accion":"CREAR"}}')/$(cuerpo estado)" "200/COMPLETADA"
 rest "$ADMIN" "producto?codigo=eq.NUEVO-COCA2&select=codigo" >/dev/null
 check "  se creó el producto nuevo"                 "$(cuerpo 0.codigo)" "NUEVO-COCA2"
