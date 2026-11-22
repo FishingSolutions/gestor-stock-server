@@ -8,8 +8,8 @@
 //
 // Lógica pura: no toca la base ni la red.
 // =====================================================================
-// SheetJS publica las versiones seguras en su propio CDN
-import * as XLSX from 'https://cdn.sheetjs.com/xlsx-0.20.3/package/xlsx.mjs'
+// Dependencia XLSX compatible con Supabase Edge Functions.
+import * as XLSX from 'npm:@e965/xlsx@0.20.3'
 
 import { LIMITES, normalizarEncabezado, normalizarTexto } from './texto.ts'
 import type { FilaArchivo, LecturaArchivo } from './tipos.ts'
