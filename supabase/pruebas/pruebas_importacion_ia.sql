@@ -13,8 +13,11 @@
 -- se defiende sola aunque alguien saltee la Edge Function.
 -- =====================================================================
 \pset pager off
-\set como_admin 'set local role authenticated; set local request.jwt.claims to ''{"sub":"11111111-1111-1111-1111-111111111111","role":"authenticated"}'';'
-\set como_emp   'set local role authenticated; set local request.jwt.claims to ''{"sub":"22222222-2222-2222-2222-222222222222","role":"authenticated"}'';'
+-- Las pruebas de reglas SQL ejecutan como owner para seguir cubriendo la RPC
+-- subyacente, ahora privada para authenticated. La identidad se simula con
+-- claims y el control de permisos de ambas RPC se prueba aparte.
+\set como_admin 'set local role postgres; set local request.jwt.claims to ''{"sub":"11111111-1111-1111-1111-111111111111","role":"authenticated"}'';'
+\set como_emp   'set local role postgres; set local request.jwt.claims to ''{"sub":"22222222-2222-2222-2222-222222222222","role":"authenticated"}'';'
 \set coca      '(select id_producto from public.producto where codigo = ''COCA500'')'
 \set agua      '(select id_producto from public.producto where codigo = ''AGUA2L'')'
 

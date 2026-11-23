@@ -94,7 +94,7 @@ No hace falta `--no-verify-jwt`: la función valida la sesión y además el rol 
 | `AI_MODEL` | sí, junto con la clave | — | Identificador del modelo habilitado en la cuenta/proveedor. No hay modelo predeterminado. |
 | `AI_TIMEOUT_MS` | no | `15000` | Corte de la llamada. |
 | `AI_MAX_SAMPLE_ROWS` | no | `10` | Filas de muestra que se mandan (máximo 10). |
-| `AI_DAILY_LIMIT` | no | `20` | Tope diario de importaciones con IA por proyecto. |
+| `IMPORTACION_IA_SIGNING_SECRET` | sí | — | Secreto aleatorio de al menos 32 caracteres para firmar el vínculo persistido entre análisis y confirmación. Requerido también cuando se usa el fallback determinista. |
 
 Ejemplo de configuración con un endpoint de Google Gemini compatible con OpenAI (confirmá en AI Studio que el modelo indicado esté habilitado en tu cuenta):
 
@@ -105,13 +105,37 @@ Ejemplo de configuración con un endpoint de Google Gemini compatible con OpenAI
 npx supabase secrets set \
   AI_API_KEY=tu_clave \
   AI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai \
-  AI_MODEL=MODELO_DISPONIBLE_EN_TU_CUENTA
+  AI_MODEL=MODELO_DISPONIBLE_EN_TU_CUENTA \
+  IMPORTACION_IA_SIGNING_SECRET="$(openssl rand -hex 32)"
 ```
 
 Si falta la clave, el endpoint o el modelo, la función no llama a un proveedor y usa el mapeo
 determinista. El mismo fallback aplica si hay timeout, error HTTP o respuesta inválida.
 
-Para probar en local, crear `supabase/functions/.env` con las mismas variables.
+El límite de consumo es de 20 reservas por día calendario de `America/Argentina/Buenos_Aires`,
+compartido por todos los administradores del proyecto y contabilizado al iniciar cada solicitud.
+Si falta la configuración del proveedor, no se reserva cupo. Si falla la reserva o el registro
+persistente del análisis, Gemini no se invoca. La Edge Function usa `SUPABASE_SERVICE_ROLE_KEY`
+solo para el contador y registro privado; las lecturas y escrituras de inventario siguen usando el
+JWT del administrador.
+Si falla la finalización después de llamar a Gemini, el resultado del análisis se conserva y la
+reserva queda contabilizada. Para marcar reservas colgadas de más de
+10 minutos como `TIMEOUT` sin liberar cupo, un operador puede invocar manualmente
+`public.recuperar_solicitudes_ia_abandonadas()` con `service_role`; no hay un job automático.
+
+Cada análisis tiene un UUID persistido y queda vinculado atómicamente a la primera confirmación
+exitosa. La misma clave de idempotencia y huella puede reintentarse, incluso tras vencer el token;
+otro uso requiere un nuevo análisis. Un reanálisis con mapeo corregido actualiza el contexto del
+análisis antes de la confirmación.
+Las vistas previas nunca confirmadas pueden limpiarse manualmente con
+`public.limpiar_analisis_ia_expirados()` (`service_role`); conserva los vínculos del historial.
+
+La importación tradicional sigue disponible por separado mediante la Edge Function
+`importar-productos` y su RPC `importar_productos`. Esta ruta no consume ni confirma análisis IA:
+solo inserta productos nuevos, valida el rol de administrador en Edge y SQL, valida campos y
+registra su propio historial. No se revocan sus permisos como parte del despliegue IA.
+
+Para probar en local, crear `supabase/functions/.env` con las variables anteriores.
 
 ### 2.4 Cliente
 
@@ -321,10 +345,16 @@ Cubren, entre otras cosas:
 ```bash
 docker exec -i supabase_db_gestor-stock-server psql -U postgres -d postgres \
   < supabase/pruebas/pruebas_importacion_ia.sql
+docker exec -i supabase_db_gestor-stock-server psql -U postgres -d postgres \
+  < supabase/pruebas/pruebas_solicitud_ia.sql
+docker exec -i supabase_db_gestor-stock-server psql -U postgres -d postgres \
+  < supabase/pruebas/pruebas_trazabilidad_importacion.sql
 ```
 
 Verifica rol, atomicidad, rechazo de lotes inválidos, `SUMAR`/`REEMPLAZAR`, altas con stock,
-idempotencia y RLS. Todo corre en transacciones con `ROLLBACK`.
+idempotencia y RLS. Las nuevas pruebas cubren permisos de RPC, cuota, vínculo persistente,
+hojas/mapas/usuarios distintos, replay idempotente y expiración. Todo corre en transacciones con
+`ROLLBACK`.
 
 ### API / End-to-End
 
@@ -334,6 +364,15 @@ npx supabase start -x realtime,storage-api,imgproxy,mailpit,studio,logflare,vect
 npx supabase db reset --local --no-seed
 docker exec -i supabase_db_gestor-stock-server psql -U postgres -d postgres < supabase/pruebas/datos_demo.sql
 bash supabase/pruebas/prueba_importacion_ia.sh
+```
+
+La función local necesita `IMPORTACION_IA_SIGNING_SECRET` en
+`supabase/functions/.env` (se admite no configurar Gemini para probar el fallback determinista).
+La concurrencia del vínculo se prueba por separado con una base local disponible:
+
+```bash
+export DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:54322/postgres'
+bash supabase/pruebas/prueba_trazabilidad_concurrente.sh
 ```
 
 Cubre 40+ casos por HTTP: permisos, vista previa sin escrituras, archivos inválidos, alta,

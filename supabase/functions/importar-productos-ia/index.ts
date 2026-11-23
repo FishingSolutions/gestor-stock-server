@@ -24,7 +24,17 @@ import {
 } from '../_shared/importacion/mapeo.ts'
 import { construirFilas } from '../_shared/importacion/filas.ts'
 import { clasificarFilas, resumirFilas } from '../_shared/importacion/coincidencias.ts'
-import { sugerirMapeo, type ResultadoIA } from '../_shared/importacion/ia.ts'
+import { iaConfigurada, sugerirMapeo, type ResultadoIA } from '../_shared/importacion/ia.ts'
+import {
+  firmarTrazabilidad as firmarToken,
+  verificarTrazabilidad as verificarToken,
+  type TrazabilidadIA,
+} from '../_shared/importacion/trazabilidad.ts'
+import {
+  ejecutarIAConReserva,
+  finalizarSolicitudIA,
+  reservarSolicitudIA,
+} from '../_shared/importacion/consumo-ia.ts'
 import { cargarCategorias, cargarProductos } from '../_shared/importacion/datos.ts'
 import type { Mapeo, ModoStock } from '../_shared/importacion/tipos.ts'
 
@@ -68,12 +78,12 @@ Deno.serve(async (req) => {
       throw new ErrorHttp(405, 'METODO_NO_PERMITIDO', 'Usá POST con multipart/form-data.')
     }
 
-    const supabase = await clienteDelAdmin(req)
+    const contexto = await clienteDelAdmin(req)
     const formulario = await leerFormulario(req)
     const accion = String(formulario.get('accion') ?? 'analizar').toLowerCase()
 
-    if (accion === 'analizar') return await analizar(formulario, supabase)
-    if (accion === 'confirmar') return await confirmar(formulario, supabase)
+    if (accion === 'analizar') return await analizar(formulario, contexto)
+    if (accion === 'confirmar') return await confirmar(formulario, contexto)
 
     throw new ErrorHttp(400, 'ACCION_INVALIDA', 'La acción tiene que ser "analizar" o "confirmar".')
   } catch (error) {
@@ -91,24 +101,42 @@ Deno.serve(async (req) => {
 // ---------------------------------------------------------------------
 // Autenticación: solo ADMINISTRADOR activo
 // ---------------------------------------------------------------------
-async function clienteDelAdmin(req: Request): Promise<SupabaseClient> {
+interface ContextoAdmin {
+  inventario: SupabaseClient
+  interno: SupabaseClient | null
+  idUsuario: string
+}
+
+async function clienteDelAdmin(req: Request): Promise<ContextoAdmin> {
   const autorizacion = req.headers.get('Authorization') ?? ''
   if (!/^Bearer\s+\S+/i.test(autorizacion)) {
     throw new ErrorHttp(401, 'SIN_SESION', 'Tenés que iniciar sesión para importar productos.')
   }
+  const accessToken = autorizacion.replace(/^Bearer\s+/i, '').trim()
 
   const supabase = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_ANON_KEY')!, {
     global: { headers: { Authorization: autorizacion } },
     auth: { persistSession: false, autoRefreshToken: false },
   })
 
+  const { data: usuario, error: errorUsuario } = await supabase.auth.getUser(accessToken)
+  if (errorUsuario || !usuario.user?.id) {
+    throw new ErrorHttp(401, 'SIN_SESION', 'Tenés que iniciar sesión para importar productos.')
+  }
   const { data: rol, error } = await supabase.rpc('rol_actual')
   if (error) throw new ErrorHttp(401, 'SIN_SESION', 'Tenés que iniciar sesión para importar productos.')
   if (rol !== 'ADMINISTRADOR') {
     throw new ErrorHttp(403, 'SOLO_ADMINISTRADOR', 'Solo un administrador puede importar productos.')
   }
 
-  return supabase
+  // Solo se crea el cliente privilegiado después de validar JWT, usuario y rol.
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
+  const interno = serviceKey
+    ? createClient(Deno.env.get('SUPABASE_URL')!, serviceKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    })
+    : null
+  return { inventario: supabase, interno, idUsuario: usuario.user.id }
 }
 
 // ---------------------------------------------------------------------
@@ -175,13 +203,15 @@ function leerJson<T>(valor: FormDataEntryValue | null, porDefecto: T): T {
 // ---------------------------------------------------------------------
 // Paso 1: analizar (sin escribir nada)
 // ---------------------------------------------------------------------
-async function analizar(formulario: FormData, supabase: SupabaseClient) {
+async function analizar(formulario: FormData, contexto: ContextoAdmin) {
+  const { inventario: supabase, interno, idUsuario } = contexto
   const { bytes, nombre, hash, archivo } = await leerArchivo(formulario)
-  const hoja = texto(formulario.get('hoja'))
+  const hojaPedida = texto(formulario.get('hoja'))
   const modo = leerModo(texto(formulario.get('modoStock')))
   const mapeoPedido = leerJson<Mapeo | null>(formulario.get('mapeo'), null)
+  const tokenOrigen = texto(formulario.get('iaToken'))
 
-  const lectura = leerLibro(bytes, hoja, ALIAS_CONOCIDOS)
+  const lectura = leerLibro(bytes, hojaPedida, ALIAS_CONOCIDOS)
   let base = mapearPorAlias(lectura.encabezados)
 
   // El cliente puede mandar el mapeo que ya revisó: en ese caso no se llama a la IA.
@@ -192,10 +222,39 @@ async function analizar(formulario: FormData, supabase: SupabaseClient) {
   const sinMapear = columnasSinMapear(lectura.encabezados, base)
   let ia: ResultadoIA = { usada: false, modelo: null, ms: 0, motivo: 'NO_HIZO_FALTA', sugerencias: null }
   let rechazadasIA: string[] = []
+  let iaOrigen: TrazabilidadIA | null = null
 
-  if (!mapeoPedido && (faltanCamposClave(base) || sinMapear.length > 0)) {
-    if (await puedeUsarIA(supabase)) {
-      ia = await sugerirMapeo(lectura.encabezados, lectura.filas)
+  if (tokenOrigen) {
+    iaOrigen = await verificarToken(
+      Deno.env.get('IMPORTACION_IA_SIGNING_SECRET') ?? '',
+      tokenOrigen,
+      { sub: idUsuario, hash, hoja: lectura.hoja },
+    )
+    if (!iaOrigen || !(await validarAnalisisPersistido(interno, iaOrigen))) {
+      throw new ErrorHttp(400, 'TRAZABILIDAD_IA_INVALIDA', 'El análisis anterior no corresponde a este usuario, archivo u hoja.')
+    }
+    ia = {
+      usada: iaOrigen.usada,
+      modelo: iaOrigen.modelo,
+      ms: iaOrigen.ms,
+      motivo: iaOrigen.usada ? null : 'IA_SIN_APORTES',
+      sugerencias: null,
+    }
+  }
+
+  if (!tokenOrigen && !mapeoPedido && (faltanCamposClave(base) || sinMapear.length > 0)) {
+    if (!iaConfigurada()) {
+      ia = { ...ia, motivo: 'IA_NO_CONFIGURADA' }
+    } else if (!interno || !(await trazabilidadDisponible())) {
+      ia = { ...ia, motivo: 'IA_CONTROL_NO_DISPONIBLE' }
+    } else {
+      ia = await ejecutarIAConReserva(
+        () => reservarIA(interno, idUsuario),
+        () => sugerirMapeo(lectura.encabezados, lectura.filas),
+        (id, resultado) => finalizarIA(interno, id, resultado),
+        Deno.env.get('AI_MODEL')?.trim() ?? null,
+        (evento) => console.error(`Control IA: ${evento}`),
+      )
       if (ia.usada) {
         const antes = Object.keys(base).length
         const combinado = combinarMapeo(base, ia.sugerencias, lectura.encabezados.length)
@@ -208,10 +267,20 @@ async function analizar(formulario: FormData, supabase: SupabaseClient) {
           ia = { ...ia, usada: false, motivo: 'IA_SIN_APORTES' }
         }
       }
-    } else {
-      ia = { usada: false, modelo: null, ms: 0, motivo: 'IA_LIMITE_DIARIO', sugerencias: null }
     }
   }
+  if (!interno) {
+    throw new ErrorHttp(503, 'CONTROL_IA_NO_DISPONIBLE', 'No está disponible el registro seguro del análisis.')
+  }
+  const iaToken = await crearAnalisisFirmado(
+    interno,
+    idUsuario,
+    hash,
+    lectura.hoja,
+    base,
+    ia,
+    iaOrigen,
+  )
 
   const advertencias = [...rechazadasIA]
 
@@ -242,6 +311,7 @@ async function analizar(formulario: FormData, supabase: SupabaseClient) {
         motivo: ia.motivo,
         rechazadas: rechazadasIA,
       },
+      iaToken,
       modoStock: modo,
       resumen: { filas: 0, nuevos: 0, existentes: 0, sinCambios: 0, ambiguas: 0, invalidas: 0 },
       advertencias,
@@ -312,6 +382,7 @@ async function analizar(formulario: FormData, supabase: SupabaseClient) {
       motivo: ia.motivo,
       rechazadas: rechazadasIA,
     },
+    iaToken,
     modoStock: modo,
     categoriasNuevas,
     resumen,
@@ -328,7 +399,8 @@ interface Decision {
   idProducto?: number
 }
 
-async function confirmar(formulario: FormData, supabase: SupabaseClient) {
+async function confirmar(formulario: FormData, contexto: ContextoAdmin) {
+  const { inventario: supabase, idUsuario } = contexto
   const { bytes, nombre, hash, archivo } = await leerArchivo(formulario)
   const hoja = texto(formulario.get('hoja'))
   const modo = leerModo(texto(formulario.get('modoStock')))
@@ -336,10 +408,7 @@ async function confirmar(formulario: FormData, supabase: SupabaseClient) {
   const crearCategorias = texto(formulario.get('crearCategorias')) === 'true'
   const mapeoPedido = leerJson<Mapeo | null>(formulario.get('mapeo'), null)
   const decisionesCrudas = leerJson<unknown>(formulario.get('decisiones'), {})
-  const ia = leerJson<{ usada?: boolean; modelo?: string | null; ms?: number }>(
-    formulario.get('ia'),
-    { usada: false, modelo: null, ms: 0 },
-  )
+  const iaToken = texto(formulario.get('iaToken'))
 
   if (!clave || !UUID.test(clave)) {
     throw new ErrorHttp(400, 'IDEMPOTENCIA_FALTANTE', 'Falta la clave de idempotencia de la importación.')
@@ -349,6 +418,19 @@ async function confirmar(formulario: FormData, supabase: SupabaseClient) {
   const base = mapeoPedido && typeof mapeoPedido === 'object'
     ? combinarMapeo({}, { columnas: mapeoPedido }, lectura.encabezados.length).mapeo
     : mapearPorAlias(lectura.encabezados)
+
+  const ia = iaToken
+    ? await verificarToken(
+      Deno.env.get('IMPORTACION_IA_SIGNING_SECRET') ?? '',
+      iaToken,
+      { sub: idUsuario, hash, hoja: lectura.hoja, mapeo: base },
+      Date.now(),
+      true,
+    )
+    : null
+  if (!ia) {
+    throw new ErrorHttp(400, 'TRAZABILIDAD_IA_INVALIDA', 'El análisis no corresponde a este usuario, archivo, hoja o mapeo. Volvé a analizarlo.')
+  }
 
   if (faltanCamposClave(base)) {
     throw new ErrorHttp(
@@ -456,7 +538,7 @@ async function confirmar(formulario: FormData, supabase: SupabaseClient) {
     )
   }
 
-  const { data: resultado, error } = await supabase.rpc('confirmar_importacion_productos', {
+  const { data: resultado, error } = await supabase.rpc('confirmar_importacion_productos_vinculada', {
     p_idempotency_key: clave,
     p_archivo: nombre,
     p_hoja: lectura.hoja,
@@ -474,10 +556,17 @@ async function confirmar(formulario: FormData, supabase: SupabaseClient) {
       columnasIgnoradas: columnasSinMapear(lectura.encabezados, base),
       decisiones,
     },
-    p_ia: { usada: ia.usada === true, modelo: ia.modelo ?? null, ms: Number(ia.ms) || 0 },
+    p_id_analisis: ia.id,
   })
 
   if (error) {
+    if (/ANALISIS_IMPORTACION_YA_VINCULADA/.test(error.message ?? '')) {
+      throw new ErrorHttp(
+        409,
+        'ANALISIS_IA_YA_VINCULADO',
+        'Este análisis o esta importación ya están asociados a otra operación. Volvé a analizar el archivo.',
+      )
+    }
     if (/IDEMPOTENCIA_CONFLICTO/.test(error.message ?? '')) {
       throw new ErrorHttp(
         409,
@@ -597,25 +686,131 @@ function validarDecisiones(
 }
 
 // ---------------------------------------------------------------------
-// Control de costo de la IA: un tope diario configurable
+// Reserva global y trazabilidad de IA (el contador es fail-closed).
 // ---------------------------------------------------------------------
-async function puedeUsarIA(supabase: SupabaseClient): Promise<boolean> {
-  const limite = Number(Deno.env.get('AI_DAILY_LIMIT')) || 20
-  try {
-    const desde = new Date()
-    desde.setHours(0, 0, 0, 0)
+async function reservarIA(
+  interno: SupabaseClient,
+  idUsuario: string,
+): Promise<{ ok: true; id: number } | { ok: false; limite: boolean }> {
+  return reservarSolicitudIA(
+    async (nombre, parametros) => {
+      const { data, error } = await interno.rpc(nombre as never, parametros as never)
+      return { data, error }
+    },
+    idUsuario,
+    Deno.env.get('AI_MODEL')?.trim() ?? null,
+    (evento) => console.error(`Control IA: ${evento}`),
+  )
+}
 
-    const { count } = await supabase
-      .from('importacion_producto')
-      .select('id_importacion', { count: 'exact', head: true })
-      .eq('ia_usada', true)
-      .gte('fecha', desde.toISOString())
+async function finalizarIA(interno: SupabaseClient, id: number, resultado: ResultadoIA) {
+  // La excepción secundaria no oculta el resultado del análisis. La fila
+  // RESERVADA sigue contando y puede marcarse manualmente como TIMEOUT.
+  await finalizarSolicitudIA(
+    async (nombre, parametros) => {
+      const { data, error } = await interno.rpc(nombre as never, parametros as never)
+      return { data, error }
+    },
+    id,
+    resultado,
+    (evento) => console.error(`Control IA: ${evento}; solicitud=${id}`),
+  )
+}
 
-    return (count ?? 0) < limite
-  } catch {
-    // Si no se puede contar, se permite: el límite es una protección, no una regla de negocio.
-    return true
+function trazabilidadDisponible(): boolean {
+  return (Deno.env.get('IMPORTACION_IA_SIGNING_SECRET') ?? '').length >= 32
+}
+
+async function validarAnalisisPersistido(
+  interno: SupabaseClient | null,
+  claims: TrazabilidadIA,
+): Promise<boolean> {
+  if (!interno) return false
+  const { data, error } = await interno
+    .from('importacion_ia_analisis')
+    .select('id_analisis,id_usuario,hash_archivo,hoja,mapeo,expira_en,ia_usada,ia_modelo,ia_ms,idempotency_key')
+    .eq('id_analisis', claims.id)
+    .eq('id_usuario', claims.sub)
+    .maybeSingle()
+  if (error || !data || data.idempotency_key) return false
+  const mapeoPersistido = JSON.stringify(
+    Object.fromEntries(Object.entries(data.mapeo as Record<string, number>).sort(([a], [b]) => a.localeCompare(b))),
+  )
+  const mapeoToken = JSON.stringify(
+    Object.fromEntries(Object.entries(claims.mapeo).sort(([a], [b]) => a.localeCompare(b))),
+  )
+  return data.hash_archivo === claims.hash &&
+    data.hoja === claims.hoja &&
+    mapeoPersistido === mapeoToken &&
+    data.ia_usada === claims.usada &&
+    data.ia_modelo === claims.modelo &&
+    data.ia_ms === claims.ms &&
+    new Date(data.expira_en).getTime() > Date.now()
+}
+
+async function crearAnalisisFirmado(
+  interno: SupabaseClient,
+  idUsuario: string,
+  hash: string,
+  hoja: string,
+  mapeo: Mapeo,
+  ia: ResultadoIA,
+  origen: TrazabilidadIA | null,
+): Promise<string> {
+  const secreto = Deno.env.get('IMPORTACION_IA_SIGNING_SECRET') ?? ''
+  if (secreto.length < 32) {
+    throw new ErrorHttp(503, 'TRAZABILIDAD_IA_NO_DISPONIBLE', 'No está configurada la firma segura del análisis.')
   }
+  const exp = Date.now() + 30 * 60 * 1000
+  const id = origen?.id ?? crypto.randomUUID()
+  if (origen) {
+    if (!(await validarAnalisisPersistido(interno, origen))) {
+      throw new ErrorHttp(409, 'ANALISIS_IA_CAMBIADO', 'El análisis ya cambió o expiró. Volvé a analizar el archivo.')
+    }
+    const { data, error } = await interno
+      .from('importacion_ia_analisis')
+      .update({
+        mapeo,
+        expira_en: new Date(exp).toISOString(),
+      })
+      .eq('id_analisis', id)
+      .eq('id_usuario', idUsuario)
+      .is('idempotency_key', null)
+      .gt('expira_en', new Date().toISOString())
+      .select('id_analisis')
+      .maybeSingle()
+    if (error || !data) {
+      console.error('No se pudo actualizar el contexto persistido del análisis.')
+      throw new ErrorHttp(409, 'ANALISIS_IA_CAMBIADO', 'El análisis ya fue confirmado o expiró. Volvé a analizarlo.')
+    }
+  } else {
+    const { error } = await interno.from('importacion_ia_analisis').insert({
+      id_analisis: id,
+      id_usuario: idUsuario,
+      hash_archivo: hash,
+      hoja,
+      mapeo,
+      expira_en: new Date(exp).toISOString(),
+      ia_usada: ia.usada,
+      ia_modelo: ia.modelo,
+      ia_ms: Math.max(0, Math.trunc(ia.ms)),
+    })
+    if (error) {
+      console.error('No se pudo persistir el análisis IA.')
+      throw new ErrorHttp(503, 'TRAZABILIDAD_IA_NO_DISPONIBLE', 'No se pudo registrar el análisis de forma segura.')
+    }
+  }
+  return firmarToken(secreto, {
+    id,
+    sub: idUsuario,
+    hash,
+    hoja,
+    mapeo,
+    exp,
+    usada: ia.usada,
+    modelo: ia.modelo,
+    ms: Math.max(0, Math.trunc(ia.ms)),
+  })
 }
 
 function leerModo(valor: string | null): ModoStock | null {

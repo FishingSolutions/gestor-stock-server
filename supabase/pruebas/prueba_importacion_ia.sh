@@ -44,11 +44,27 @@ analizar() {
   post "$tk" -F "accion=analizar" -F "archivo=@$f" "$@"
 }
 confirmar() {
-  local tk="$1" f="$2" key="$3" modo="$4" decisiones="$5" crear="$6" mapeo="$7"
+  local tk="$1" f="$2" key="$3" modo="$4" decisiones="${5:-}" crear="${6:-}" mapeo="${7:-}"
   [ -z "$decisiones" ] && decisiones='{}'
   [ -z "$crear" ] && crear=false
+  local opciones_analisis=()
+  [ -n "$mapeo" ] && opciones_analisis+=(-F "mapeo=$mapeo")
+  local estado_analisis
+  estado_analisis=$(analizar "$tk" "$f" "${opciones_analisis[@]}")
+  if [ "$estado_analisis" != 200 ]; then
+    printf '%s' "$estado_analisis"
+    return 0
+  fi
+  local ia_token hoja
+  ia_token=$(cuerpo iaToken)
+  hoja=$(cuerpo archivo.hoja)
+  if [ -z "$ia_token" ] || [ "$ia_token" = "null" ]; then
+    printf '500'
+    return 0
+  fi
   local args=(-F "accion=confirmar" -F "archivo=@$f" -F "idempotencyKey=$key"
-              -F "decisiones=$decisiones" -F "crearCategorias=$crear")
+              -F "decisiones=$decisiones" -F "crearCategorias=$crear"
+              -F "iaToken=$ia_token" -F "hoja=$hoja")
   [ -n "$modo" ] && args+=(-F "modoStock=$modo")
   [ -n "$mapeo" ] && args+=(-F "mapeo=$mapeo")
   post "$tk" "${args[@]}"
@@ -140,7 +156,7 @@ echo "=============== QUIÉN PUEDE IMPORTAR ==============="
 check "Sin login (analizar)"                        "$(analizar "$ANON_KEY" "$DIR/basico.xlsx")/$(cuerpo error.codigo)" "401/SIN_SESION"
 check "EMPLEADO (analizar)"                         "$(analizar "$EMP" "$DIR/basico.xlsx")/$(cuerpo error.codigo)" "403/SOLO_ADMINISTRADOR"
 check "  mensaje"                                   "$(cuerpo error.mensaje)" "Solo un administrador puede importar productos."
-check "EMPLEADO llamando a la función SQL directo"  "$(rest "$EMP" rpc/confirmar_importacion_productos '{"p_idempotency_key":"bbbbbbbb-1111-4111-8111-000000000001","p_archivo":"x.xlsx","p_filas":[]}')/$(cuerpo message)" "400/Solo un administrador puede importar productos"
+check "EMPLEADO llamando al RPC vinculado"          "$(rest "$EMP" rpc/confirmar_importacion_productos_vinculada '{"p_idempotency_key":"bbbbbbbb-1111-4111-8111-000000000001","p_archivo":"x.xlsx","p_hoja":"Hoja","p_tamano_bytes":1,"p_modo_stock":null,"p_filas":[],"p_crear_categorias":false,"p_detalle":{},"p_id_analisis":null}')/$(cuerpo message)" "400/Solo un administrador puede importar productos"
 
 echo; echo "=============== ANALIZAR: VISTA PREVIA SIN ESCRIBIR ==============="
 rest "$ADMIN" "importacion_producto?select=id_importacion" >/dev/null
@@ -184,13 +200,18 @@ check "  no se duplicó el stock"                    "$(cuerpo 0.stock_actual)" 
 check "Misma clave con otro modo es conflicto"      "$(confirmar "$ADMIN" "$DIR/basico.xlsx" "$K1" SUMAR '{}')/$(cuerpo error.codigo)" "409/IDEMPOTENCIA_CONFLICTO"
 
 echo; echo "=============== REINTENTOS SIMULTÁNEOS ==============="
+check "Analizar archivo para reintentos simultáneos" "$(analizar "$ADMIN" "$DIR/concurrente.xlsx")" "200"
+CONC_IA_TOKEN=$(cuerpo iaToken)
+CONC_HOJA=$(cuerpo archivo.hoja)
 curl -s -o "$DIR/concurrente-1.json" -w '%{http_code}' -X POST "$FN" \
+  -F "iaToken=$CONC_IA_TOKEN" -F "hoja=$CONC_HOJA" \
   -H "apikey: $ANON_KEY" -H "Authorization: Bearer $ADMIN" \
   -F "accion=confirmar" -F "archivo=@$DIR/concurrente.xlsx" \
   -F "idempotencyKey=$K12" -F 'modoStock=REEMPLAZAR' -F 'decisiones={}' \
   -F 'crearCategorias=false' > "$DIR/concurrente-1.status" &
 PID1=$!
 curl -s -o "$DIR/concurrente-2.json" -w '%{http_code}' -X POST "$FN" \
+  -F "iaToken=$CONC_IA_TOKEN" -F "hoja=$CONC_HOJA" \
   -H "apikey: $ANON_KEY" -H "Authorization: Bearer $ADMIN" \
   -F "accion=confirmar" -F "archivo=@$DIR/concurrente.xlsx" \
   -F "idempotencyKey=$K12" -F 'modoStock=REEMPLAZAR' -F 'decisiones={}' \

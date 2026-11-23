@@ -122,6 +122,14 @@ export function validarConfiguracionProveedor(
   }
 }
 
+export function iaConfigurada(): boolean {
+  return validarConfiguracionProveedor(
+    Deno.env.get('AI_API_KEY') ?? null,
+    Deno.env.get('AI_BASE_URL') ?? null,
+    Deno.env.get('AI_MODEL') ?? null,
+  ) !== null
+}
+
 /**
  * Pide a la IA que proponga el mapeo de columnas.
  * Nunca lanza: cualquier problema se devuelve como `usada: false`.
