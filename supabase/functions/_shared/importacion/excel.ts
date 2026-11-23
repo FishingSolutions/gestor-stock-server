@@ -4,7 +4,7 @@
 // A diferencia del importador viejo (que exige encontrar los alias exactos
 // de las columnas), acá solo se detecta la FILA DE ENCABEZADOS y se
 // devuelven las celdas crudas. El mapeo de columnas lo resuelve `mapeo.ts`
-// (alias) y, si hace falta, una única llamada a la IA.
+// (alias) y, si hace falta, una solicitud lógica a la IA.
 //
 // Lógica pura: no toca la base ni la red.
 // =====================================================================

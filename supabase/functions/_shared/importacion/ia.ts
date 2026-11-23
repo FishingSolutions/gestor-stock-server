@@ -2,7 +2,8 @@
 // Llamada a la IA para mapear columnas.
 //
 // Se usa un proveedor compatible con OpenAI configurado por entorno y se
-// hace UNA sola llamada por archivo. Nunca se manda el inventario completo.
+// hace una solicitud lógica por archivo (con un único reintento ante 503).
+// Nunca se manda el inventario completo.
 //
 // Los números de las muestras se enmascaran ("<numero>"), así el modelo
 // puede inferir el tipo de columna sin ver precios ni stock reales.
@@ -14,6 +15,10 @@ import { normalizarTexto } from './texto.ts'
 
 const TIMEOUT_POR_DEFECTO = 15000
 const MAX_MUESTRAS = 10
+const MAX_REINTENTOS_503 = 1
+const ESPERA_REINTENTO_MS = 200
+const MAX_BYTES_ERROR_PROVEEDOR = 8192
+const MAX_LONGITUD_ENCABEZADO_IA = 200
 
 const CAMPOS_VALIDOS = [
   'codigo', 'nombre', 'descripcion', 'categoria', 'stock',
@@ -58,6 +63,9 @@ export function enmascarar(valor: unknown): string | null {
 }
 
 function construirMensajes(encabezados: string[], muestras: unknown[][]) {
+  const encabezadosParaIA = encabezados.map((encabezado) =>
+    encabezado.slice(0, MAX_LONGITUD_ENCABEZADO_IA),
+  )
   const sistema = [
     'Sos un asistente que mapea columnas de planillas de inventario a un esquema fijo.',
     'Devolvés SOLO un JSON válido con la forma {"columnas": {"<campo>": <indice de columna>}}.',
@@ -73,7 +81,7 @@ function construirMensajes(encabezados: string[], muestras: unknown[][]) {
 
   const usuario = [
     `Encabezados (${encabezados.length} columnas):`,
-    JSON.stringify(encabezados),
+    JSON.stringify(encabezadosParaIA),
     '',
     'Primeras filas de muestra (valores enmascarados):',
     JSON.stringify(muestras),
@@ -104,6 +112,130 @@ function extraerJson(texto: string): unknown {
   } catch {
     return null
   }
+}
+
+interface DiagnosticoProveedor {
+  codigo: string | null
+  estado: string | null
+  mensaje: string | null
+}
+
+function valorDiagnostico(valor: unknown): string | null {
+  if (typeof valor === 'string') return valor.slice(0, 500)
+  if (typeof valor === 'number' || typeof valor === 'boolean') return String(valor)
+  return null
+}
+
+function escaparRegex(texto: string): string {
+  return texto.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function sanitizarDiagnostico(
+  valor: unknown,
+  apiKey: string,
+  encabezados: string[],
+): string | null {
+  let texto = valorDiagnostico(valor)
+  if (!texto) return null
+
+  texto = texto
+    .replaceAll(apiKey, '[REDACTED]')
+    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/\bAIza[0-9A-Za-z_-]{20,}\b/g, '[REDACTED]')
+    .replace(/((?:api[_-]?key|key|token)\s*[=:]\s*)[^&\s,;]+/gi, '$1[REDACTED]')
+
+  // El proveedor puede reflejar encabezados comerciales en su mensaje.
+  for (const encabezado of [...encabezados].sort((a, b) => b.length - a.length)) {
+    const limpio = encabezado.trim()
+    if (limpio.length >= 2) {
+      texto = texto.replace(new RegExp(escaparRegex(limpio), 'gi'), '[DATO_REDACTED]')
+    }
+  }
+
+  return texto.replace(/\s+/g, ' ').trim().slice(0, 240) || null
+}
+
+async function leerTextoLimitado(respuesta: Response, maxBytes: number): Promise<string> {
+  if (!respuesta.body) return ''
+  const lector = respuesta.body.getReader()
+  const fragmentos: Uint8Array[] = []
+  let longitud = 0
+  try {
+    while (longitud < maxBytes) {
+      const { done, value } = await lector.read()
+      if (done || !value) break
+      const disponible = Math.min(value.length, maxBytes - longitud)
+      fragmentos.push(value.slice(0, disponible))
+      longitud += disponible
+      if (disponible < value.length) {
+        await lector.cancel()
+        break
+      }
+    }
+    if (longitud >= maxBytes) await lector.cancel()
+  } catch {
+    // Un body de error parcial no debe ocultar el estado HTTP ni el fallback.
+  } finally {
+    try {
+      lector.releaseLock()
+    } catch {
+      // El stream pudo quedar cancelado por el proveedor.
+    }
+  }
+
+  const bytes = new Uint8Array(longitud)
+  let offset = 0
+  for (const fragmento of fragmentos) {
+    bytes.set(fragmento, offset)
+    offset += fragmento.length
+  }
+  return new TextDecoder().decode(bytes)
+}
+
+async function diagnosticoRespuesta(
+  respuesta: Response,
+  apiKey: string,
+  encabezados: string[],
+): Promise<DiagnosticoProveedor> {
+  const texto = await leerTextoLimitado(respuesta, MAX_BYTES_ERROR_PROVEEDOR)
+  let cuerpo: any = null
+  let esJson = false
+  try {
+    cuerpo = JSON.parse(texto)
+    esJson = true
+  } catch {
+    // Algunos gateways devuelven texto plano; se conserva solo sanitizado y limitado.
+  }
+
+  const error = cuerpo?.error && typeof cuerpo.error === 'object' ? cuerpo.error : cuerpo
+  return {
+    codigo: sanitizarDiagnostico(error?.code ?? error?.type, apiKey, encabezados),
+    estado: sanitizarDiagnostico(error?.status ?? respuesta.status, apiKey, encabezados),
+    mensaje: sanitizarDiagnostico(
+      error?.message ?? error?.detail ?? (!esJson ? texto : null),
+      apiKey,
+      encabezados,
+    ),
+  }
+}
+
+function esperarReintento(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException('Se agotó el tiempo de espera.', 'AbortError'))
+      return
+    }
+    const temporizador = setTimeout(() => {
+      signal.removeEventListener('abort', abortar)
+      resolve()
+    }, ms)
+    const abortar = () => {
+      clearTimeout(temporizador)
+      signal.removeEventListener('abort', abortar)
+      reject(new DOMException('Se agotó el tiempo de espera.', 'AbortError'))
+    }
+    signal.addEventListener('abort', abortar, { once: true })
+  })
 }
 
 /** No elige proveedor/modelo por el usuario: exige una configuración explícita. */
@@ -153,32 +285,62 @@ export async function sugerirMapeo(
   const inicio = Date.now()
   const control = new AbortController()
   const temporizador = setTimeout(() => control.abort(), timeout)
+  const urlMensajes = construirMensajes(encabezados, muestras)
 
   try {
-    const respuesta = await fetch(configuracion.url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${configuracion.apiKey}`,
-      },
-      signal: control.signal,
-      body: JSON.stringify({
-        model: configuracion.modelo,
-        temperature: 0,
-        max_tokens: 400,
-        messages: construirMensajes(encabezados, muestras),
-      }),
-    })
+    let respuesta: Response | null = null
+    for (let intento = 0; intento <= MAX_REINTENTOS_503; intento++) {
+      respuesta = await fetch(configuracion.url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${configuracion.apiKey}`,
+        },
+        signal: control.signal,
+        body: JSON.stringify({
+          model: configuracion.modelo,
+          temperature: 0,
+          max_tokens: 400,
+          messages: urlMensajes,
+        }),
+      })
+
+      if (respuesta.ok) break
+
+      const diagnostico = await diagnosticoRespuesta(respuesta, configuracion.apiKey, encabezados)
+      const evento = {
+        httpStatus: respuesta.status,
+        providerCode: diagnostico.codigo,
+        providerStatus: diagnostico.estado,
+        providerMessage: diagnostico.mensaje,
+        attempt: intento + 1,
+      }
+      if (respuesta.status === 503 && intento < MAX_REINTENTOS_503) {
+        console.warn('[importacion-ia] Proveedor devolvió 503; se reintentará una vez.', evento)
+        await esperarReintento(ESPERA_REINTENTO_MS, control.signal)
+        continue
+      }
+
+      console.error('[importacion-ia] Error HTTP del proveedor.', evento)
+      const ms = Date.now() - inicio
+      if (respuesta.status === 429) {
+        return { usada: false, modelo: configuracion.modelo, ms, motivo: 'IA_SIN_CUOTA', sugerencias: null }
+      }
+      return {
+        usada: false,
+        modelo: configuracion.modelo,
+        ms,
+        motivo: `IA_ERROR_HTTP_${respuesta.status}`,
+        sugerencias: null,
+      }
+    }
+
+    if (!respuesta?.ok) {
+      const ms = Date.now() - inicio
+      return { usada: false, modelo: configuracion.modelo, ms, motivo: 'IA_NO_DISPONIBLE', sugerencias: null }
+    }
 
     const ms = Date.now() - inicio
-
-    if (respuesta.status === 429) {
-      return { usada: false, modelo: configuracion.modelo, ms, motivo: 'IA_SIN_CUOTA', sugerencias: null }
-    }
-    if (!respuesta.ok) {
-      return { usada: false, modelo: configuracion.modelo, ms, motivo: `IA_ERROR_HTTP_${respuesta.status}`, sugerencias: null }
-    }
-
     const cuerpo = await respuesta.json()
     const contenido = cuerpo?.choices?.[0]?.message?.content
     if (typeof contenido !== 'string' || !contenido.trim()) {
@@ -194,6 +356,11 @@ export async function sugerirMapeo(
   } catch (error) {
     const ms = Date.now() - inicio
     const abortado = error instanceof Error && error.name === 'AbortError'
+    console.error('[importacion-ia] La llamada al proveedor falló.', {
+      tipo: abortado ? 'timeout' : 'transporte',
+      timeoutMs: timeout,
+      elapsedMs: ms,
+    })
     return {
       usada: false,
       modelo: configuracion.modelo,
