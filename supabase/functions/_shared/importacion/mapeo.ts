@@ -79,9 +79,19 @@ export const ALIAS_CONOCIDOS: Set<string> = new Set(ALIAS_NORMALIZADOS.keys())
 export function mapearPorAlias(encabezados: string[]): Mapeo {
   const mapeo: Mapeo = {}
   const usados = new Set<number>()
+  const normalizados = encabezados.map(normalizarEncabezado)
+  // "descripcion" historically worked as a synonym for nombre. When a sheet
+  // also has an explicit nombre column, treat the separate descripcion
+  // column as the long description instead of silently ignoring it.
+  const tieneNombreExplicito = normalizados.some(
+    (encabezado) => encabezado !== 'descripcion' && ALIAS_NORMALIZADOS.get(encabezado) === 'nombre',
+  )
 
-  encabezados.forEach((encabezado, columna) => {
-    const campo = ALIAS_NORMALIZADOS.get(normalizarEncabezado(encabezado))
+  normalizados.forEach((encabezado, columna) => {
+    const campo: Campo | undefined =
+      encabezado === 'descripcion' && tieneNombreExplicito
+        ? 'descripcion'
+        : ALIAS_NORMALIZADOS.get(encabezado)
     if (!campo || mapeo[campo] !== undefined || usados.has(columna)) return
     mapeo[campo] = columna
     usados.add(columna)

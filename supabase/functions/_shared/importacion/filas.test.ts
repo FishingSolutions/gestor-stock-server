@@ -2,6 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { construirFilas } from './filas.ts'
+import { mapearPorAlias } from './mapeo.ts'
 import type { LecturaArchivo, Mapeo } from './tipos.ts'
 
 function lectura(filas: unknown[][]): LecturaArchivo {
@@ -32,6 +33,34 @@ test('interpreta una fila completa', () => {
   assert.equal(fila.stock, 15000)
   assert.equal(fila.precio, 1500.5)
   assert.equal(fila.costo, 900)
+})
+
+test('interpreta los campos de una planilla con nombre y descripcion separados', () => {
+  const encabezados = [
+    'codigo',
+    'nombre',
+    'descripcion',
+    'precio',
+    'stock_actual',
+    'stock_minimo',
+    'stock_maximo',
+    'categoria',
+  ]
+  const lecturaConEncabezados: LecturaArchivo = {
+    ...lectura([['SKU-42', 'Café', 'Grano tostado', 1250.5, 18, 2, 40, 'Bebidas']]),
+    encabezados,
+  }
+  const [fila] = construirFilas(lecturaConEncabezados, mapearPorAlias(encabezados))
+
+  assert.equal(fila.codigo, 'SKU-42')
+  assert.equal(fila.nombre, 'Café')
+  assert.equal(fila.descripcion, 'Grano tostado')
+  assert.equal(fila.precio, 1250.5)
+  assert.equal(fila.stock, 18)
+  assert.equal(fila.stockMinimo, 2)
+  assert.equal(fila.stockMaximo, 40)
+  assert.equal(fila.categoria, 'Bebidas')
+  assert.deepEqual(fila.errores, [])
 })
 
 test('el stock faltante queda en null (no se inventa)', () => {

@@ -26,6 +26,32 @@ test('"Descripcion" se usa como nombre y "Detalle" como descripción larga', () 
   assert.equal(mapeo.descripcion, 2)
 })
 
+test('los encabezados explícitos separan nombre, descripcion, precio y stocks', () => {
+  const encabezados = [
+    'codigo',
+    'nombre',
+    'descripcion',
+    'precio',
+    'stock_actual',
+    'stock_minimo',
+    'stock_maximo',
+    'categoria',
+  ]
+  const mapeo = mapearPorAlias(encabezados)
+
+  assert.deepEqual(mapeo, {
+    codigo: 0,
+    nombre: 1,
+    descripcion: 2,
+    precio: 3,
+    stock: 4,
+    stockMinimo: 5,
+    stockMaximo: 6,
+    categoria: 7,
+  })
+  assert.deepEqual(columnasSinMapear(encabezados, mapeo), [])
+})
+
 test('una columna repetida no se asigna dos veces', () => {
   const mapeo = mapearPorAlias(['Codigo', 'Nombre'])
 
