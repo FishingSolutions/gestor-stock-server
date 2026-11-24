@@ -36,6 +36,12 @@ import {
   reservarSolicitudIA,
 } from '../_shared/importacion/consumo-ia.ts'
 import { cargarCategorias, cargarProductos } from '../_shared/importacion/datos.ts'
+import {
+  analisisPuedeReutilizarse,
+  claveIdempotenciaValida,
+  ErrorDecision,
+  validarDecisiones,
+} from '../_shared/importacion/confirmacion-segura.ts'
 import type { Mapeo, ModoStock } from '../_shared/importacion/tipos.ts'
 
 const CORS = {
@@ -43,8 +49,6 @@ const CORS = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 class ErrorHttp extends Error {
   constructor(
@@ -211,7 +215,7 @@ async function analizar(formulario: FormData, contexto: ContextoAdmin) {
   const mapeoPedido = leerJson<Mapeo | null>(formulario.get('mapeo'), null)
   const tokenOrigen = texto(formulario.get('iaToken'))
 
-  const lectura = leerLibro(bytes, hojaPedida, ALIAS_CONOCIDOS)
+  const lectura = await leerLibro(bytes, hojaPedida, ALIAS_CONOCIDOS)
   let base = mapearPorAlias(lectura.encabezados)
 
   // El cliente puede mandar el mapeo que ya revisó: en ese caso no se llama a la IA.
@@ -394,11 +398,6 @@ async function analizar(formulario: FormData, contexto: ContextoAdmin) {
 // ---------------------------------------------------------------------
 // Paso 2: confirmar (una transacción en la base)
 // ---------------------------------------------------------------------
-interface Decision {
-  accion?: 'VINCULAR' | 'CREAR' | 'EXCLUIR'
-  idProducto?: number
-}
-
 async function confirmar(formulario: FormData, contexto: ContextoAdmin) {
   const { inventario: supabase, idUsuario } = contexto
   const { bytes, nombre, hash, archivo } = await leerArchivo(formulario)
@@ -410,11 +409,11 @@ async function confirmar(formulario: FormData, contexto: ContextoAdmin) {
   const decisionesCrudas = leerJson<unknown>(formulario.get('decisiones'), {})
   const iaToken = texto(formulario.get('iaToken'))
 
-  if (!clave || !UUID.test(clave)) {
+  if (!claveIdempotenciaValida(clave)) {
     throw new ErrorHttp(400, 'IDEMPOTENCIA_FALTANTE', 'Falta la clave de idempotencia de la importación.')
   }
 
-  const lectura = leerLibro(bytes, hoja, ALIAS_CONOCIDOS)
+  const lectura = await leerLibro(bytes, hoja, ALIAS_CONOCIDOS)
   const base = mapeoPedido && typeof mapeoPedido === 'object'
     ? combinarMapeo({}, { columnas: mapeoPedido }, lectura.encabezados.length).mapeo
     : mapearPorAlias(lectura.encabezados)
@@ -452,7 +451,13 @@ async function confirmar(formulario: FormData, contexto: ContextoAdmin) {
   }
 
   const filas = construirFilas(lectura, base)
-  const decisiones = validarDecisiones(decisionesCrudas, filas)
+  let decisiones: ReturnType<typeof validarDecisiones>
+  try {
+    decisiones = validarDecisiones(decisionesCrudas, filas)
+  } catch (error) {
+    if (error instanceof ErrorDecision) throw new ErrorHttp(400, error.codigo, error.message)
+    throw error
+  }
   const productos = await cargarProductos(supabase)
   const previa = clasificarFilas(filas, productos, modo)
 
@@ -640,51 +645,6 @@ function aPago(fila: ReturnType<typeof clasificarFilas>[number], accion: string,
   }
 }
 
-function validarDecisiones(
-  valor: unknown,
-  filas: ReturnType<typeof construirFilas>,
-): Record<string, Decision> {
-  if (!valor || typeof valor !== 'object' || Array.isArray(valor)) {
-    throw new ErrorHttp(400, 'DECISIONES_INVALIDAS', 'Las decisiones de filas no tienen un formato válido.')
-  }
-
-  const existentes = new Map(filas.map((fila) => [String(fila.fila), fila]))
-  const resultado: Record<string, Decision> = {}
-
-  for (const [numero, decision] of Object.entries(valor)) {
-    if (!/^[1-9]\d*$/.test(numero) || !existentes.has(numero)) {
-      throw new ErrorHttp(400, 'DECISION_FILA_INVALIDA', `La fila "${numero}" no pertenece al archivo.`)
-    }
-    if (!decision || typeof decision !== 'object' || Array.isArray(decision)) {
-      throw new ErrorHttp(400, 'DECISION_INVALIDA', `La decisión de la fila ${numero} no es válida.`)
-    }
-
-    const objeto = decision as Record<string, unknown>
-    if (Object.keys(objeto).some((campo) => !['accion', 'idProducto'].includes(campo))) {
-      throw new ErrorHttp(400, 'DECISION_INVALIDA', `La decisión de la fila ${numero} contiene campos no permitidos.`)
-    }
-
-    const accion = objeto.accion
-    if (accion !== 'VINCULAR' && accion !== 'CREAR' && accion !== 'EXCLUIR') {
-      throw new ErrorHttp(400, 'DECISION_INVALIDA', `La acción de la fila ${numero} no es válida.`)
-    }
-
-    if (accion === 'VINCULAR') {
-      if (!Number.isSafeInteger(objeto.idProducto) || Number(objeto.idProducto) <= 0) {
-        throw new ErrorHttp(400, 'PRODUCTO_INVALIDO', `El producto elegido para la fila ${numero} no es válido.`)
-      }
-      resultado[numero] = { accion, idProducto: Number(objeto.idProducto) }
-    } else {
-      if (objeto.idProducto !== undefined) {
-        throw new ErrorHttp(400, 'DECISION_INVALIDA', `La decisión de la fila ${numero} no debe incluir un producto.`)
-      }
-      resultado[numero] = { accion: accion as Decision['accion'] }
-    }
-  }
-
-  return resultado
-}
-
 // ---------------------------------------------------------------------
 // Reserva global y trazabilidad de IA (el contador es fail-closed).
 // ---------------------------------------------------------------------
@@ -733,19 +693,16 @@ async function validarAnalisisPersistido(
     .eq('id_usuario', claims.sub)
     .maybeSingle()
   if (error || !data || data.idempotency_key) return false
-  const mapeoPersistido = JSON.stringify(
-    Object.fromEntries(Object.entries(data.mapeo as Record<string, number>).sort(([a], [b]) => a.localeCompare(b))),
-  )
-  const mapeoToken = JSON.stringify(
-    Object.fromEntries(Object.entries(claims.mapeo).sort(([a], [b]) => a.localeCompare(b))),
-  )
-  return data.hash_archivo === claims.hash &&
-    data.hoja === claims.hoja &&
-    mapeoPersistido === mapeoToken &&
-    data.ia_usada === claims.usada &&
-    data.ia_modelo === claims.modelo &&
-    data.ia_ms === claims.ms &&
-    new Date(data.expira_en).getTime() > Date.now()
+  return analisisPuedeReutilizarse({
+    idempotency_key: data.idempotency_key,
+    hash_archivo: data.hash_archivo,
+    hoja: data.hoja,
+    mapeo: data.mapeo as Record<string, number>,
+    expira_en: data.expira_en,
+    ia_usada: data.ia_usada,
+    ia_modelo: data.ia_modelo,
+    ia_ms: data.ia_ms,
+  }, claims)
 }
 
 async function crearAnalisisFirmado(

@@ -19,6 +19,14 @@ const MAX_REINTENTOS_503 = 1
 const ESPERA_REINTENTO_MS = 200
 const MAX_BYTES_ERROR_PROVEEDOR = 8192
 const MAX_LONGITUD_ENCABEZADO_IA = 200
+const TIMEOUT_MINIMO = 1000
+const TIMEOUT_MAXIMO = 30000
+const MUESTRAS_MINIMAS = 1
+const MUESTRAS_MAXIMAS = 10
+const DOMINIOS_PROVEEDOR = new Set([
+  'generativelanguage.googleapis.com',
+  'api.openai.com',
+])
 
 const CAMPOS_VALIDOS = [
   'codigo', 'nombre', 'descripcion', 'categoria', 'stock',
@@ -246,12 +254,36 @@ export function validarConfiguracionProveedor(
 ): { apiKey: string; url: URL; modelo: string } | null {
   if (!apiKey?.trim() || !base?.trim() || !modelo?.trim()) return null
   try {
-    const url = new URL(`${base.trim().replace(/\/+$/, '')}/chat/completions`)
-    if (url.protocol !== 'https:' || url.username || url.password) return null
+    const url = new URL(base.trim())
+    const basePath = url.pathname.replace(/\/+$/, '')
+    if (
+      url.protocol !== 'https:' ||
+      !DOMINIOS_PROVEEDOR.has(url.hostname.toLowerCase()) ||
+      url.username ||
+      url.password ||
+      (url.port && url.port !== '443') ||
+      url.search ||
+      url.hash ||
+      (url.hostname === 'generativelanguage.googleapis.com' && basePath !== '/v1beta/openai') ||
+      (url.hostname === 'api.openai.com' && basePath !== '/v1')
+    ) return null
+    url.pathname = `${basePath}/chat/completions`
     return { apiKey: apiKey.trim(), url, modelo: modelo.trim() }
   } catch {
     return null
   }
+}
+
+export function limiteEntero(
+  valor: string | undefined,
+  predeterminado: number,
+  minimo: number,
+  maximo: number,
+): number {
+  if (valor === undefined || valor.trim() === '') return predeterminado
+  const numero = Number(valor)
+  if (!Number.isFinite(numero) || !Number.isInteger(numero)) return predeterminado
+  return Math.min(maximo, Math.max(minimo, numero))
 }
 
 export function iaConfigurada(): boolean {
@@ -278,8 +310,18 @@ export async function sugerirMapeo(
   const configuracion = validarConfiguracionProveedor(apiKey, baseConfigurada, modelo)
   if (!configuracion) return SIN_USO('IA_CONFIGURACION_INCOMPLETA')
 
-  const timeout = Number(Deno.env.get('AI_TIMEOUT_MS')) || TIMEOUT_POR_DEFECTO
-  const maxMuestras = Number(Deno.env.get('AI_MAX_SAMPLE_ROWS')) || MAX_MUESTRAS
+  const timeout = limiteEntero(
+    Deno.env.get('AI_TIMEOUT_MS'),
+    TIMEOUT_POR_DEFECTO,
+    TIMEOUT_MINIMO,
+    TIMEOUT_MAXIMO,
+  )
+  const maxMuestras = limiteEntero(
+    Deno.env.get('AI_MAX_SAMPLE_ROWS'),
+    MAX_MUESTRAS,
+    MUESTRAS_MINIMAS,
+    MUESTRAS_MAXIMAS,
+  )
 
   const muestras = muestrasParaIA(filas.slice(0, maxMuestras), encabezados)
   const inicio = Date.now()
@@ -296,6 +338,7 @@ export async function sugerirMapeo(
           'Content-Type': 'application/json',
           Authorization: `Bearer ${configuracion.apiKey}`,
         },
+        redirect: 'error',
         signal: control.signal,
         body: JSON.stringify({
           model: configuracion.modelo,

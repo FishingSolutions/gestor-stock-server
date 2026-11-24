@@ -3,10 +3,10 @@
 //
 // Hay dos pasos:
 //   1. Alias deterministas (gratis y sin red).
-//   2. Si falta algo importante, una única llamada a la IA que devuelve
-//      candidatos. Lo que devuelve el modelo se valida acá: si propone un
-//      campo inexistente, una columna fuera de rango o repetida, se
-//      descarta. Nunca se confía en el JSON del modelo.
+//   2. Si falta algo importante, una solicitud lógica a la IA (con un
+//      reintento acotado ante 503) que devuelve candidatos. Lo que devuelve
+//      el modelo se valida acá: si propone un campo inexistente, una columna
+//      fuera de rango o repetida, se descarta. Nunca se confía en su JSON.
 // =====================================================================
 import { normalizarEncabezado } from './texto.ts'
 import { CAMPOS, type Campo, type Mapeo } from './tipos.ts'

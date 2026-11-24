@@ -2,24 +2,95 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { ejecutarIAConReserva } from './consumo-ia.ts'
-import { enmascarar, muestrasParaIA, sugerirMapeo, validarConfiguracionProveedor } from './ia.ts'
+import {
+  enmascarar,
+  limiteEntero,
+  muestrasParaIA,
+  sugerirMapeo,
+  validarConfiguracionProveedor,
+} from './ia.ts'
 
 test('la IA requiere proveedor y modelo configurados explícitamente', () => {
   assert.equal(validarConfiguracionProveedor('clave', null, 'modelo'), null)
-  assert.equal(validarConfiguracionProveedor('clave', 'https://api.example.com/v1', null), null)
+  assert.equal(validarConfiguracionProveedor('clave', 'https://generativelanguage.googleapis.com/v1beta/openai', null), null)
   assert.equal(
-    validarConfiguracionProveedor('clave', 'http://api.example.com/v1', 'modelo'),
+    validarConfiguracionProveedor('clave', 'http://generativelanguage.googleapis.com/v1beta/openai', 'modelo'),
     null,
   )
 
   const configuracion = validarConfiguracionProveedor(
     ' clave ',
-    'https://api.example.com/v1/',
+    'https://generativelanguage.googleapis.com/v1beta/openai/',
     ' modelo-confirmado ',
   )
   assert.equal(configuracion?.apiKey, 'clave')
-  assert.equal(configuracion?.url.href, 'https://api.example.com/v1/chat/completions')
+  assert.equal(configuracion?.url.href, 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions')
   assert.equal(configuracion?.modelo, 'modelo-confirmado')
+  assert.equal(
+    validarConfiguracionProveedor('clave', 'https://api.openai.com/v1', 'modelo')?.url.href,
+    'https://api.openai.com/v1/chat/completions',
+  )
+})
+
+test('rechaza URLs de proveedor maliciosas o incompatibles', () => {
+  const maliciosas = [
+    'http://generativelanguage.googleapis.com/v1beta/openai',
+    'https://generativelanguage.googleapis.com.attacker.example/v1beta/openai',
+    'https://attacker.example/generativelanguage.googleapis.com/v1beta/openai',
+    'https://user:pass@generativelanguage.googleapis.com/v1beta/openai',
+    'https://generativelanguage.googleapis.com:8443/v1beta/openai',
+    'https://generativelanguage.googleapis.com/v1beta/openai?redirect=https://attacker.example',
+    'https://generativelanguage.googleapis.com/v1beta/openai#fragment',
+    'https://generativelanguage.googleapis.com/v1',
+  ]
+  for (const url of maliciosas) {
+    assert.equal(validarConfiguracionProveedor('clave', url, 'modelo'), null, url)
+  }
+})
+
+test('valida estrictamente timeout y cantidad de muestras', () => {
+  assert.equal(limiteEntero(undefined, 15000, 1000, 30000), 15000)
+  assert.equal(limiteEntero('abc', 15000, 1000, 30000), 15000)
+  assert.equal(limiteEntero('1.5', 15000, 1000, 30000), 15000)
+  assert.equal(limiteEntero('999999', 15000, 1000, 30000), 30000)
+  assert.equal(limiteEntero('10', 10, 1, 10), 10)
+  assert.equal(limiteEntero('0', 10, 1, 10), 1)
+  assert.equal(limiteEntero('-5', 10, 1, 10), 1)
+})
+
+test('configuración fuera de rango se limita a valores seguros', async () => {
+  const originalDeno = (globalThis as any).Deno
+  const originalFetch = globalThis.fetch
+  const originalError = console.error
+  let body: any
+  let timeoutSignal: AbortSignal | undefined
+  ;(globalThis as any).Deno = {
+    env: { get: (name: string) => ({
+      AI_API_KEY: 'secret',
+      AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
+      AI_MODEL: 'gemini-test',
+      AI_TIMEOUT_MS: '999999',
+      AI_MAX_SAMPLE_ROWS: '999999',
+    }[name]) },
+  }
+  console.error = () => {}
+  globalThis.fetch = async (_url, init) => {
+    body = JSON.parse(String(init?.body))
+    timeoutSignal = init?.signal as AbortSignal
+    return Response.json({ choices: [{ message: { content: '{"columnas":{}}' } }] })
+  }
+  try {
+    await sugerirMapeo(['A'], Array.from({ length: 20 }, (_, i) => ({ celdas: [String(i)] })))
+    const texto = body.messages[1].content
+    const muestras = JSON.parse(texto.slice(texto.indexOf('[', texto.indexOf('muestra'))))
+    assert.equal(muestras.length, 10)
+    assert.equal(timeoutSignal?.aborted, false)
+  } finally {
+    globalThis.fetch = originalFetch
+    console.error = originalError
+    if (originalDeno === undefined) delete (globalThis as any).Deno
+    else (globalThis as any).Deno = originalDeno
+  }
 })
 
 test('los números no salen del sistema', () => {
@@ -60,7 +131,7 @@ test('HTTP 429 se devuelve como resultado controlado sin exponer la clave', asyn
   ;(globalThis as any).Deno = {
     env: { get: (name: string) => ({
       AI_API_KEY: 'secreto-no-loguear',
-      AI_BASE_URL: 'https://api.example.com/v1',
+      AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
       AI_MODEL: 'gemini-test',
     }[name]) },
   }
@@ -86,7 +157,7 @@ test('timeout del proveedor se devuelve como TIMEOUT y no filtra credenciales', 
   ;(globalThis as any).Deno = {
     env: { get: (name: string) => ({
       AI_API_KEY: 'secreto-no-loguear',
-      AI_BASE_URL: 'https://api.example.com/v1',
+      AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
       AI_MODEL: 'gemini-test',
     }[name]) },
   }
@@ -118,7 +189,7 @@ test('request exitoso usa endpoint compatible y la forma esperada', async () => 
     env: { get: (name: string) => ({
       AI_API_KEY: apiKey,
       AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
-      AI_MODEL: 'gemini-3.1-flash-lite',
+      AI_MODEL: 'gemini-3.5-flash-lite',
     }[name]) },
   }
   globalThis.fetch = async (url, init) => {
@@ -136,7 +207,7 @@ test('request exitoso usa endpoint compatible y la forma esperada', async () => 
     assert.equal(resultado.motivo, null)
     assert.equal(request?.url, 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions')
     const body = JSON.parse(String(request?.init.body))
-    assert.equal(body.model, 'gemini-3.1-flash-lite')
+    assert.equal(body.model, 'gemini-3.5-flash-lite')
     assert.equal(body.max_tokens, 400)
     assert.equal(body.temperature, 0)
     assert.deepEqual(body.messages.map((message: { role: string }) => message.role), ['system', 'user'])
@@ -170,7 +241,7 @@ test('errores HTTP se diferencian y el diagnóstico no filtra clave ni encabezad
   ;(globalThis as any).Deno = {
     env: { get: (name: string) => ({
       AI_API_KEY: apiKey,
-      AI_BASE_URL: 'https://api.example.com/v1',
+      AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
       AI_MODEL: 'gemini-test',
     }[name]) },
   }
@@ -224,7 +295,7 @@ test('un 503 se reintenta una vez bajo una sola reserva y finalización', async 
   ;(globalThis as any).Deno = {
     env: { get: (name: string) => ({
       AI_API_KEY: 'secret',
-      AI_BASE_URL: 'https://api.example.com/v1',
+      AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
       AI_MODEL: 'gemini-test',
     }[name]) },
   }
@@ -272,7 +343,7 @@ test('el timeout total aborta la solicitud y no intenta recuperarla como error H
   ;(globalThis as any).Deno = {
     env: { get: (name: string) => ({
       AI_API_KEY: 'secret',
-      AI_BASE_URL: 'https://api.example.com/v1',
+      AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
       AI_MODEL: 'gemini-test',
       AI_TIMEOUT_MS: '10',
     }[name]) },
@@ -307,21 +378,28 @@ test('el 503 no extiende el límite total de timeout configurado', async () => {
   ;(globalThis as any).Deno = {
     env: { get: (name: string) => ({
       AI_API_KEY: 'secret',
-      AI_BASE_URL: 'https://api.example.com/v1',
+      AI_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta/openai',
       AI_MODEL: 'gemini-test',
       AI_TIMEOUT_MS: '10',
     }[name]) },
   }
   console.error = () => {}
   console.warn = () => {}
-  globalThis.fetch = async () => {
+  globalThis.fetch = async (_url, init) => {
     intentos++
-    return Response.json({ error: { code: 'UNAVAILABLE', message: 'temporary' } }, { status: 503 })
+    if (intentos === 1) {
+      return Response.json({ error: { code: 'UNAVAILABLE', message: 'temporary' } }, { status: 503 })
+    }
+    return new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), {
+        once: true,
+      })
+    })
   }
   try {
     const resultado = await sugerirMapeo(['SKU'], [{ celdas: ['masked'] }])
     assert.equal(resultado.motivo, 'IA_TIMEOUT')
-    assert.equal(intentos, 1)
+    assert.equal(intentos, 2)
   } finally {
     globalThis.fetch = originalFetch
     console.error = originalError

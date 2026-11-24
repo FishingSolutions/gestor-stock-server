@@ -52,5 +52,16 @@ test('token alterado y secreto débil son rechazados', async () => {
     await verificarTrazabilidad(secreto, `${cuerpo.slice(0, -1)}A.${firma}`, contexto),
     null,
   )
+  assert.equal(await verificarTrazabilidad(secreto, `${token}.extra`, contexto), null)
+  assert.equal(
+    await verificarTrazabilidad(secreto, token, { ...contexto, id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' }),
+    null,
+  )
   await assert.rejects(() => firmarTrazabilidad('corto', contexto))
+})
+
+test('rechaza tokens vacíos, sobredimensionados y con formato inválido', async () => {
+  for (const token of ['', 'no-es-un-token', `${'A'.repeat(8193)}.firma`, '.']) {
+    assert.equal(await verificarTrazabilidad(secreto, token, contexto), null)
+  }
 })

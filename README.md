@@ -2,6 +2,9 @@
 
 Servidor REST API desarrollado en Node.js y Express para el control de inventario.
 
+Requiere Node.js 20.12 o superior en la rama 20, o Node.js 22 o superior,
+según los engines declarados en `package.json` y el soporte de `deflate-raw`.
+
 ## Tecnologías
 - Node.js
 - Express

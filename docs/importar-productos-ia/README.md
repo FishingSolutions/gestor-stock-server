@@ -92,8 +92,8 @@ No hace falta `--no-verify-jwt`: la función valida la sesión y además el rol 
 | `AI_API_KEY` | no | — | Clave del proveedor. Sin ella, el importador funciona con alias y avisa `IA_NO_CONFIGURADA`. |
 | `AI_BASE_URL` | sí, junto con la clave | — | Endpoint HTTPS compatible con OpenAI, elegido según el proveedor. |
 | `AI_MODEL` | sí, junto con la clave | — | Identificador del modelo habilitado en la cuenta/proveedor. No hay modelo predeterminado. |
-| `AI_TIMEOUT_MS` | no | `15000` | Corte de la llamada. |
-| `AI_MAX_SAMPLE_ROWS` | no | `10` | Filas de muestra que se mandan (máximo 10). |
+| `AI_TIMEOUT_MS` | no | `15000` | Timeout limitado a 1.000–30.000 ms. Valores inválidos usan el valor predeterminado. |
+| `AI_MAX_SAMPLE_ROWS` | no | `10` | Muestras limitadas a 1–10 filas. Valores inválidos usan el máximo seguro (10). |
 | `IMPORTACION_IA_SIGNING_SECRET` | sí | — | Secreto aleatorio de al menos 32 caracteres para firmar el vínculo persistido entre análisis y confirmación. Requerido también cuando se usa el fallback determinista. |
 
 Ejemplo de configuración con un endpoint de Google Gemini compatible con OpenAI (confirmá en AI Studio que el modelo indicado esté habilitado en tu cuenta):
@@ -111,6 +111,23 @@ npx supabase secrets set \
 
 Si falta la clave, el endpoint o el modelo, la función no llama a un proveedor y usa el mapeo
 determinista. El mismo fallback aplica si hay timeout, error HTTP o respuesta inválida.
+
+La URL del proveedor se limita a `https://generativelanguage.googleapis.com/v1beta/openai`
+(Gemini) y `https://api.openai.com/v1`; se rechazan credenciales, parámetros, puertos
+alternativos y redirecciones. Para habilitar otro proveedor se requiere revisar y ampliar
+explícitamente esta allowlist en código.
+
+#### Revisión manual de seguridad de Supabase
+
+La revisión del código no permite verificar la configuración del proyecto remoto. Antes de
+desplegar, el responsable debe confirmar en Supabase Auth que las cuentas administradoras tengan
+MFA y políticas de contraseña acordes al riesgo, y que la vigencia de los JWT sea la esperada.
+Este cambio no modifica usuarios ni configuración de Auth.
+
+No se detectaron secretos reconocibles en archivos versionados durante el escaneo local. Si una
+clave del proveedor IA o `IMPORTACION_IA_SIGNING_SECRET` estuvo expuesta, rotarla manualmente en
+Supabase Edge Function Secrets y en el proveedor, y revisar los logs. El escaneo local no demuestra
+que nunca haya existido exposición histórica.
 
 El límite de consumo es de 20 reservas por día calendario de `America/Argentina/Buenos_Aires`,
 compartido por todos los administradores del proyecto y contabilizado al iniciar cada solicitud.
