@@ -2,12 +2,33 @@
 
 Servidor REST API desarrollado en Node.js y Express para el control de inventario.
 
+Requiere Node.js 20.12 o superior en la rama 20, o Node.js 22 o superior,
+según los engines declarados en `package.json` y el soporte de `deflate-raw`.
+
 ## Tecnologías
 - Node.js
 - Express
 - PostgreSQL
 
 IMPORTANTE!  NO HACER COMMITS DIRECTOS AL MAIN 
+
+## Base de datos (Supabase)
+
+La base de datos vive en Supabase y se maneja con migraciones en la carpeta `supabase/`.
+Cómo instalar la CLI, el esquema, los roles y permisos, cómo probar cambios en local y los problemas conocidos están en **[supabase/README.md](supabase/README.md)**.
+
+## Importar productos desde Excel
+
+Un **ADMINISTRADOR** carga una planilla `.xlsx` o `.xls`: se lee la hoja principal, se valida cada fila,
+las válidas se insertan en una sola transacción y se devuelve un resumen con el detalle de los errores.
+
+Corre en **Supabase**, sin servidor aparte: es la Edge Function `importar-productos` más la función
+SQL `importar_productos`.
+- Uso desde el front, formato del Excel y errores: **[supabase/README.md](supabase/README.md)**, sección "9. Importar productos desde Excel".
+- Diseño completo (modelo de datos, casos de uso, diagramas, interfaz, paso a paso): **[docs/importar-productos/README.md](docs/importar-productos/README.md)**.
+- Pantalla de ejemplo para el front: `docs/importar-productos/ImportarProductos.jsx`.
+- Planillas de ejemplo: `docs/importar-productos/ejemplos/` (se regeneran con `npm run generar-ejemplos`).
+- Pruebas: `bash supabase/pruebas/prueba_importacion.sh` (base local).
 
 ## Instalación local
 
